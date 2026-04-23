@@ -1,0 +1,50 @@
+{
+  "skill_name": "paulwei-crypto",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我分析一下当前BTC的市场结构，我想知道现在处于什么位置",
+      "expected_output": "Structured market analysis showing MA7/MA14/MA30 deviations with state labels, 30-day price range, ATR14, key support/resistance levels from pivot points, 4h trend direction, funding rate bias, and a synthesized judgment with long/short watch zones. Uses the ━━━ bordered format from SKILL.md.",
+      "files": [],
+      "expectations": [
+        "Output uses the structured ━━━━ bordered format with 📊 header",
+        "MA30 deviation is calculated and labeled with one of the 5 state labels (过热/偏高/均衡/偏低/超跌)",
+        "ATR14 value is provided with daily volatility percentage",
+        "4h trend direction is identified (上升/下降/横盘震荡)",
+        "Funding rate is included with interpretation of who is paying",
+        "Both 做多关注区 and 做空关注区 are provided with price ranges",
+        "Output fetches live Binance data (uses curl or binance-cli)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "我账户有8000美元，我判断SOL要涨，帮我制定一个做多策略",
+      "expected_output": "A complete long strategy for SOLUSDT with: entry zone based on market structure, 3-batch limit order placement at psychological price levels (ending in 999/888/777), position sizing calculated from 0.5% account risk ($40 max loss), specific dollar amounts for each leverage scenario, and exit plan with partial-close levels.",
+      "files": [],
+      "expectations": [
+        "Position sizing uses 0.5% risk = $40 max loss for $8000 account",
+        "At least one entry order price ends in 999, 888, or 777",
+        "3-batch order layout is provided (50% / 30% / 20% split)",
+        "Stop distance in % is used to calculate nominal position size",
+        "Exit plan includes at least two partial-close levels",
+        "Output uses the ━━━━ bordered format with 📐 header",
+        "Output fetches live SOLUSDT market data from Binance"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "我想全仓20倍杠杆做多ETH，现在ETH在1800左右，我账户有2万美元，你帮我评估一下这个操作",
+      "expected_output": "Trade evaluation that identifies multiple red line violations (leverage >5x = red line 1, full position = red line 3, loss >3% = red line 2), provides improvement suggestions keeping the long direction but adjusting size and leverage, and gives a clear risk rating of HIGH or EXTREME with specific modification recommendations.",
+      "files": [],
+      "expectations": [
+        "Red line #1 triggered: leverage 20x exceeds 5x limit",
+        "Red line #3 triggered: full position (全仓) identified",
+        "Red line #2 triggered: with 20x leverage, a 5% move = 100% loss, far exceeding 3% account limit",
+        "Comprehensive risk level is rated 高 or 极高",
+        "Improvement plan keeps long direction but reduces to compliant position size",
+        "Output uses the ━━━━ bordered format with 🔍 header",
+        "Output fetches live ETHUSDT market data for context"
+      ]
+    }
+  ]
+}
