@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "paulwei-crypto": {
+      "source": "hanniballei/paulwei-crypto-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "de8f8e65b45d61eba07d0653ba7afccaefb9335cf058b21ebeaa69c8d4486147"
+    }
+  }
+}
