@@ -13,7 +13,7 @@
         "4h trend direction is identified (上升/下降/横盘震荡)",
         "Funding rate is included with interpretation of who is paying",
         "Both 做多关注区 and 做空关注区 are provided with price ranges",
-        "Output fetches live Binance data (uses curl or binance-cli)"
+        "Output fetches live public market data through the bundled script and identifies the actual provider (Binance or OKX)"
       ]
     },
     {
@@ -28,7 +28,7 @@
         "Stop distance in % is used to calculate nominal position size",
         "Exit plan includes at least two partial-close levels",
         "Output uses the ━━━━ bordered format with 📐 header",
-        "Output fetches live SOLUSDT market data from Binance"
+        "Output fetches live SOLUSDT-compatible perpetual/swap market data and identifies the actual provider (Binance or OKX)"
       ]
     },
     {
@@ -43,7 +43,7 @@
         "Comprehensive risk level is rated 高 or 极高",
         "Improvement plan keeps long direction but reduces to compliant position size",
         "Output uses the ━━━━ bordered format with 🔍 header",
-        "Output fetches live ETHUSDT market data for context"
+        "Output fetches live ETHUSDT-compatible perpetual/swap market data for context and identifies the actual provider (Binance or OKX)"
       ]
     }
   ]

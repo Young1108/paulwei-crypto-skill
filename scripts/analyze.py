@@ -1,38 +1,278 @@
 #!/usr/bin/env python3
 """
-paulwei-crypto market analyzer
-Fetches live Binance USDT-M futures data and computes Paul Wei framework indicators.
+paulwei-crypto 市场分析脚本
+获取 Binance USDT-M 永续合约公开行情，并计算 Paul Wei 框架指标。
 
 Usage:
     python analyze.py BTCUSDT
     python analyze.py SOLUSDT
 
-Output: JSON with all computed indicators, ready for Claude to format.
-No API key required — Binance public endpoints only.
+输出：包含所有计算指标的 JSON，供 Claude 格式化。
+无需 API Key，仅使用 Binance 公开接口。
 """
 
 import json
-import subprocess
+import os
+import re
 import sys
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, getproxies, urlopen
 
 
-def fetch(endpoint, **params):
-    """Fetch from Binance USDT-M futures public API via curl."""
-    qs = "&".join(f"{k}={v}" for k, v in params.items())
-    url = f"https://fapi.binance.com/fapi/v1/{endpoint}?{qs}"
-    r = subprocess.run(
-        ["curl", "-s", "--connect-timeout", "10", "--max-time", "15", url],
-        capture_output=True, text=True
+BINANCE_API_BASE = "https://fapi.binance.com/fapi/v1"
+OKX_API_BASE = "https://www.okx.com/api/v5"
+SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
+
+
+class DataFetchError(Exception):
+    """行情数据获取或校验失败。"""
+
+
+def error_exit(message):
+    print(json.dumps({"error": message}, ensure_ascii=False))
+    sys.exit(1)
+
+
+def normalize_symbol(raw_symbol):
+    """只允许 Binance USDT-M 合约 symbol，禁止 query 污染和 shell 特殊字符。"""
+    symbol = raw_symbol.strip().upper()
+    if not SYMBOL_RE.fullmatch(symbol):
+        raise ValueError(
+            "Invalid symbol format. Use a Binance USDT-M symbol like BTCUSDT; "
+            "only A-Z, 0-9, and USDT suffix are allowed."
+        )
+    return symbol
+
+
+def parse_json_body(body):
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise DataFetchError("Binance returned a non-JSON response.") from exc
+
+
+def proxy_summary():
+    """输出当前进程可见的代理配置摘要，避免泄露代理认证信息。"""
+    proxies = getproxies()
+    visible_env = [
+        name for name in (
+            "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+            "https_proxy", "http_proxy", "all_proxy"
+        )
+        if os.environ.get(name)
+    ]
+    if not proxies:
+        return "no proxy environment variables detected"
+    schemes = ", ".join(sorted(proxies.keys()))
+    env_names = ", ".join(visible_env) if visible_env else "system proxy detected"
+    return f"proxy schemes visible to Python: {schemes}; env: {env_names}"
+
+
+def format_http_error(provider, endpoint, status_code, body):
+    msg = body.strip()
+    try:
+        payload = json.loads(body)
+        msg = payload.get("msg") or msg
+    except json.JSONDecodeError:
+        pass
+
+    if status_code == 451:
+        return (
+            f"{provider} public market API is unavailable from the current location "
+            "(HTTP 451). Do not bypass regional restrictions; use a compliant "
+            "market-data source before making any trading decision. "
+            f"Proxy diagnostics: {proxy_summary()}."
+        )
+    if status_code == 403:
+        return f"{provider} rejected the request for {endpoint} (HTTP 403): {msg}"
+    if status_code == 429:
+        return f"{provider} rate limited the request for {endpoint} (HTTP 429): {msg}"
+    if status_code >= 500:
+        return f"{provider} server error for {endpoint} (HTTP {status_code}): {msg}"
+    return f"{provider} request failed for {endpoint} (HTTP {status_code}): {msg}"
+
+
+def http_get_json(provider, base_url, endpoint, **params):
+    """通过公开行情接口获取 JSON 数据。"""
+    url = f"{base_url}/{endpoint}?{urlencode(params)}"
+    req = Request(url, headers={"User-Agent": "paulwei-crypto-skill/1.0"})
+
+    try:
+        with urlopen(req, timeout=15) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise DataFetchError(format_http_error(provider, endpoint, exc.code, body)) from exc
+    except URLError as exc:
+        raise DataFetchError(f"{provider} network error while fetching {endpoint}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise DataFetchError(f"{provider} timed out while fetching {endpoint}.") from exc
+
+    return parse_json_body(body)
+
+
+def fetch_binance(endpoint, **params):
+    """通过 Binance USDT-M 公开行情接口获取 JSON 数据。"""
+    data = http_get_json("Binance", BINANCE_API_BASE, endpoint, **params)
+    if isinstance(data, dict) and "code" in data:
+        code = data.get("code")
+        msg = data.get("msg", "")
+        symbol = params.get("symbol", "symbol")
+        if code == -1121 or "Invalid symbol" in msg:
+            raise DataFetchError(
+                f"{symbol} not found on Binance USDT-M futures. Check symbol spelling."
+            )
+        raise DataFetchError(f"Binance API error for {endpoint}: code={code}, msg={msg}")
+    return data
+
+
+def fetch_okx(endpoint, **params):
+    """通过 OKX SWAP 公开行情接口获取 data 字段。"""
+    payload = http_get_json("OKX", OKX_API_BASE, endpoint, **params)
+    if not isinstance(payload, dict):
+        raise DataFetchError(f"OKX response for {endpoint} is malformed.")
+
+    code = payload.get("code")
+    msg = payload.get("msg", "")
+    if code != "0":
+        if code == "51001":
+            inst_id = params.get("instId", "instrument")
+            raise DataFetchError(f"{inst_id} not found on OKX SWAP market.")
+        raise DataFetchError(f"OKX API error for {endpoint}: code={code}, msg={msg}")
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise DataFetchError(f"OKX response for {endpoint} is missing data.")
+    return data
+
+
+def okx_inst_id(symbol):
+    """将 BTCUSDT 转换为 OKX SWAP 的 BTC-USDT-SWAP。"""
+    base = symbol[:-4]
+    return f"{base}-USDT-SWAP"
+
+
+def normalize_okx_candles(rows):
+    """将 OKX K 线转换为脚本内部使用的 Binance K 线形状。"""
+    normalized = []
+    for row in rows:
+        if len(row) < 6:
+            raise DataFetchError("OKX candle response contains malformed rows.")
+        ts, open_, high, low, close, volume = row[:6]
+        normalized.append([int(ts), open_, high, low, close, volume])
+    normalized.sort(key=lambda row: row[0])
+    return normalized
+
+
+def fetch_market_data_binance(symbol):
+    """获取 Binance USDT-M 行情，并统一成内部数据结构。"""
+    klines_1d = require_list("daily klines", fetch_binance("klines", symbol=symbol, interval="1d", limit=90), 30)
+    klines_4h = require_list("4h klines", fetch_binance("klines", symbol=symbol, interval="4h", limit=60), 20)
+    klines_1w = require_list("weekly klines", fetch_binance("klines", symbol=symbol, interval="1w", limit=30), 1)
+    ticker = require_dict_fields(
+        "24hr ticker",
+        fetch_binance("ticker/24hr", symbol=symbol),
+        ["lastPrice", "priceChangePercent", "volume"]
     )
-    if r.returncode != 0:
-        raise ConnectionError(f"curl failed for {endpoint}: {r.stderr}")
-    return json.loads(r.stdout)
+    funding = require_list("funding rate", fetch_binance("fundingRate", symbol=symbol, limit=8), 0)
+    return {
+        "source": "binance",
+        "instrument": symbol,
+        "klines_1d": klines_1d,
+        "klines_4h": klines_4h,
+        "klines_1w": klines_1w,
+        "ticker": ticker,
+        "funding": funding,
+        "fallback_reason": None
+    }
+
+
+def fetch_market_data_okx(symbol, fallback_reason=None):
+    """获取 OKX SWAP 行情，并统一成内部数据结构。"""
+    inst_id = okx_inst_id(symbol)
+    candles_1d = require_list(
+        "OKX daily candles",
+        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="1D", limit=90)),
+        30
+    )
+    candles_4h = require_list(
+        "OKX 4h candles",
+        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="4H", limit=60)),
+        20
+    )
+    candles_1w = require_list(
+        "OKX weekly candles",
+        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="1W", limit=30)),
+        1
+    )
+
+    ticker_rows = require_list("OKX ticker", fetch_okx("market/ticker", instId=inst_id), 1)
+    ticker_row = require_dict_fields(
+        "OKX ticker",
+        ticker_rows[0],
+        ["last", "open24h", "vol24h"]
+    )
+    last = float(ticker_row["last"])
+    open24h = float(ticker_row["open24h"])
+    change_pct = (last - open24h) / open24h * 100 if open24h else 0
+    ticker = {
+        "lastPrice": ticker_row["last"],
+        "priceChangePercent": str(change_pct),
+        "volume": ticker_row["vol24h"]
+    }
+
+    funding_rows = fetch_okx("public/funding-rate-history", instId=inst_id, limit=8)
+    funding_rows.sort(key=lambda row: int(row.get("fundingTime", "0")))
+    funding = [
+        {"fundingRate": row.get("fundingRate") or row.get("realizedRate") or "0"}
+        for row in funding_rows
+    ]
+
+    return {
+        "source": "okx",
+        "instrument": inst_id,
+        "klines_1d": candles_1d,
+        "klines_4h": candles_4h,
+        "klines_1w": candles_1w,
+        "ticker": ticker,
+        "funding": funding,
+        "fallback_reason": fallback_reason
+    }
+
+
+def fetch_market_data(symbol):
+    """优先 Binance；受限或不可用时使用 OKX 公共 SWAP 行情。"""
+    try:
+        return fetch_market_data_binance(symbol)
+    except DataFetchError as binance_error:
+        try:
+            return fetch_market_data_okx(symbol, fallback_reason=str(binance_error))
+        except DataFetchError as okx_error:
+            raise DataFetchError(
+                f"Binance failed: {binance_error}; OKX fallback failed: {okx_error}"
+            ) from okx_error
+
+
+def require_list(name, data, min_len=1):
+    if not isinstance(data, list) or len(data) < min_len:
+        raise DataFetchError(f"{name} response is empty or malformed.")
+    return data
+
+
+def require_dict_fields(name, data, fields):
+    if not isinstance(data, dict):
+        raise DataFetchError(f"{name} response is malformed.")
+    missing = [field for field in fields if field not in data]
+    if missing:
+        raise DataFetchError(f"{name} response is missing fields: {', '.join(missing)}")
+    return data
 
 
 def ma(closes, n):
     if len(closes) < n:
-        return sum(closes) / len(closes)  # use available if < n
+        return sum(closes) / len(closes)  # 数据不足时使用已有样本
     return sum(closes[-n:]) / n
 
 
@@ -77,7 +317,7 @@ def trend_4h(candles_4h):
 
 
 def weekly_trend(klines_1w):
-    """Infer weekly trend from last 8 weekly candles."""
+    """根据最近 8 根周线推断周线趋势。"""
     if len(klines_1w) < 8:
         return "横盘"
     recent = klines_1w[-8:]
@@ -127,10 +367,10 @@ def ma30_state(dev_pct):
 
 def psych_levels(price, n=4):
     """
-    Find nearest psychological round-number levels above and below price.
-    Uses two granularities: major (e.g. $10k for BTC) and minor (e.g. $1k).
+    查找现价上下方最近的心理整数位。
+    使用主要和次要两个粒度，例如 BTC 的 10000 和 1000。
     """
-    # Determine interval scales based on price magnitude
+    # 根据价格数量级确定整数位粒度。
     if price >= 50000:
         scales = [10000, 5000, 1000]
     elif price >= 10000:
@@ -168,29 +408,29 @@ def psych_levels(price, n=4):
                 })
 
     levels.sort(key=lambda x: x["dist_pct"])
-    return levels[:n * 2]  # return n above + n below candidates, deduped by dist
+    return levels[:n * 2]  # 返回按距离排序后的上下方候选位。
 
 
 def entry_score(ma30_dev, trend4h, w_trend, avg_funding):
     """
-    Score entry favorability for both long and short based on Paul Wei's framework.
-    Primary driver: MA30 deviation state.
-    Modifiers: 4h trend alignment, weekly trend alignment, funding rate cost.
-    Returns scores 1-10 with labels and one-line advice.
+    基于 Paul Wei 框架评估多空关注价值。
+    主要驱动：MA30 偏离状态。
+    修正因子：4h 趋势、周线趋势、资金费率成本。
+    返回 1-10 分、标签和一句风险提示。
     """
-    # MA30 base score for long (higher score = more favorable for long)
+    # 多头基础分：分数越高，越接近框架里的多头关注区。
     if ma30_dev < -10:
-        long_base = 9    # 超跌区 — historical best long zone
+        long_base = 9    # 超跌区
     elif ma30_dev < -5:
-        long_base = 7    # 偏低区 — lean long
+        long_base = 7    # 偏低区
     elif ma30_dev < 5:
-        long_base = 5    # 均衡区 — neutral, both directions viable
+        long_base = 5    # 均衡区
     elif ma30_dev < 10:
-        long_base = 3    # 偏高区 — cautious long
+        long_base = 3    # 偏高区
     else:
-        long_base = 1    # 过热区 — avoid long
+        long_base = 1    # 过热区
 
-    # Modifiers
+    # 根据趋势和资金费率修正基础分。
     long_adj = 0
     if trend4h == "上升趋势":
         long_adj += 1
@@ -202,9 +442,9 @@ def entry_score(ma30_dev, trend4h, w_trend, avg_funding):
     elif w_trend == "下降":
         long_adj -= 1
 
-    if avg_funding < -0.0001:   # shorts paying = cheap to hold long
+    if avg_funding < -0.0001:   # 空头付费，多头持仓成本相对低
         long_adj += 1
-    elif avg_funding > 0.0003:  # expensive to hold long
+    elif avg_funding > 0.0003:  # 多头持仓成本偏高
         long_adj -= 1
 
     long_score = max(1, min(10, long_base + long_adj))
@@ -218,13 +458,13 @@ def entry_score(ma30_dev, trend4h, w_trend, avg_funding):
         return              "★     不宜操作"
 
     def advice(s, direction):
-        if s >= 8:  return f"框架信号强，可在关注区分批挂限价{direction}单"
-        if s >= 6:  return f"{direction}条件较好，等价格回踩关注区再挂单"
+        if s >= 8:  return f"框架信号较强，可将关注区作为限价{direction}的风险参考"
+        if s >= 6:  return f"{direction}条件较好，等待价格回踩关注区后再做风险复核"
         if s >= 4:  return f"{direction}有一定依据，信号尚未完全确认，仓位需小"
         if s >= 2:  return f"当前{direction}属逆势，若操作仓位需极小（≤0.25%账户）"
         return f"当前不适合{direction}，等待更好的结构机会"
 
-    # Driving factors (for transparency)
+    # 输出主要驱动因素，便于审计判断依据。
     factors = []
     state = ma30_state(ma30_dev)
     factors.append(f"MA30 {state}（主要驱动）")
@@ -249,27 +489,27 @@ def main():
         print(json.dumps({"error": "Usage: python analyze.py SYMBOL (e.g. BTCUSDT)"}))
         sys.exit(1)
 
-    symbol = sys.argv[1].upper()
+    try:
+        symbol = normalize_symbol(sys.argv[1])
+    except ValueError as e:
+        error_exit(str(e))
 
     try:
-        klines_1d = fetch("klines", symbol=symbol, interval="1d", limit=90)
-        klines_4h = fetch("klines", symbol=symbol, interval="4h", limit=60)
-        klines_1w = fetch("klines", symbol=symbol, interval="1w", limit=30)
-        ticker    = fetch("ticker/24hr", symbol=symbol)
-        funding   = fetch("fundingRate", symbol=symbol, limit=8)
-    except Exception as e:
-        print(json.dumps({"error": f"Data fetch failed: {e}"}))
-        sys.exit(1)
+        market = fetch_market_data(symbol)
+    except DataFetchError as e:
+        error_exit(f"Data fetch failed: {e}")
 
-    if isinstance(klines_1d, dict) and "code" in klines_1d:
-        print(json.dumps({"error": f"{symbol} not found on Binance USDT-M futures. Check symbol spelling."}))
-        sys.exit(1)
+    klines_1d = market["klines_1d"]
+    klines_4h = market["klines_4h"]
+    klines_1w = market["klines_1w"]
+    ticker    = market["ticker"]
+    funding   = market["funding"]
 
     price    = float(ticker["lastPrice"])
     chg      = float(ticker["priceChangePercent"])
     vol_24h  = float(ticker["volume"])
 
-    # ── Daily indicators ─────────────────────────────────────────────
+    # ── 日线指标 ────────────────────────────────────────────────────
     closes = [float(c[4]) for c in klines_1d]
     highs  = [float(c[2]) for c in klines_1d]
     lows   = [float(c[3]) for c in klines_1d]
@@ -291,7 +531,7 @@ def main():
     if not supports:
         supports = [round(low30, 4)]
 
-    # ── Weekly indicators ────────────────────────────────────────────
+    # ── 周线指标 ────────────────────────────────────────────────────
     w_closes = [float(c[4]) for c in klines_1w]
     w_highs  = [float(c[2]) for c in klines_1w]
     w_lows   = [float(c[3]) for c in klines_1w]
@@ -301,11 +541,11 @@ def main():
     w_low8   = min(w_lows[-8:])  if len(w_lows)  >= 8 else min(w_lows)
     w_trend  = weekly_trend(klines_1w)
 
-    # ── 4h structure ─────────────────────────────────────────────────
+    # ── 4h 结构 ─────────────────────────────────────────────────────
     trend4h = trend_4h(klines_4h)
     zones4h = key_zone_4h(klines_4h, price)
 
-    # ── Funding rate ─────────────────────────────────────────────────
+    # ── 资金费率 ────────────────────────────────────────────────────
     rates      = [float(f["fundingRate"]) for f in funding]
     latest_rate = rates[-1] if rates else 0
     avg_rate    = sum(rates) / len(rates) if rates else 0
@@ -317,21 +557,26 @@ def main():
     else:
         funding_desc = "多空费率接近零，情绪均衡"
 
-    # ── Volume ───────────────────────────────────────────────────────
+    # ── 成交量 ──────────────────────────────────────────────────────
     vols    = [float(c[5]) for c in klines_1d]
     avg_vol = sum(vols[-30:]) / 30 if len(vols) >= 30 else sum(vols) / len(vols)
     vol_ratio  = round(vol_24h / avg_vol, 2) if avg_vol else 1.0
     vol_status = "放量" if vol_ratio > 1.3 else ("缩量" if vol_ratio < 0.7 else "正常")
 
-    # ── Psychological price levels ───────────────────────────────────
+    # ── 心理整数位 ──────────────────────────────────────────────────
     psych = psych_levels(price, n=4)
 
-    # ── Entry score ──────────────────────────────────────────────────
+    # ── 关注评分 ────────────────────────────────────────────────────
     score = entry_score(dev30, trend4h, w_trend, avg_rate)
 
-    # ── Output ───────────────────────────────────────────────────────
+    # ── 输出 ────────────────────────────────────────────────────────
     out = {
         "symbol":    symbol,
+        "data_source": {
+            "provider": market["source"],
+            "instrument": market["instrument"],
+            "fallback_reason": market["fallback_reason"]
+        },
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "price": {
             "current":        price,

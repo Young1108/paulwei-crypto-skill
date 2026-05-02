@@ -14,14 +14,17 @@ npx skills add https://github.com/hanniballei/paulwei-crypto-skill
 
 **前提条件**：
 - Python 3.6+（系统通常已有）
-- `curl`（macOS / Linux 内置；Windows 10 1803+ 内置）
 - 无需安装任何 Python 第三方库，无需 Binance API Key
+
+**代理说明**：
+- 命令行 Python 进程只可靠读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 等标准环境变量，不一定继承系统或客户端的“全局代理”。
+- 仅在合规网络和合规市场数据访问条件下配置代理；不要使用代理绕过交易所、地区、KYC 或服务条款限制。
 
 ---
 
 ## 支持的品种
 
-所有 **Binance USDT-M 永续合约**，包括但不限于：
+支持常见 **USDT 永续/Swap 合约**。脚本优先使用 Binance USDT-M 公共行情；若 Binance 不可用，会自动切换到 OKX SWAP 公共行情。
 
 BTC / ETH / SOL / BNB / XRP / DOGE / ADA / AVAX / LINK / DOT … 及 400+ 其他合约品种。
 
@@ -104,7 +107,7 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 他的方法与大多数散户直觉相反：
 
 - **不追价**：所有建仓通过限价挂单完成，等价格来，不用市价单。建仓中位耗时 3.5 小时。
-- **不依赖止损单**：止损单使用率 <1%，靠仓位大小本身控制风险。单笔标准风险仅 0.5% 账户净值。
+- **不能只依赖止损单**：止损单使用率 <1%，但核心前提是小仓位、明确结构失效条件和退出计划。单笔标准风险仅 0.5% 账户净值。
 - **逆势思维**：MA30 偏低 >10% 时倾向建多抄底，偏高 >10% 时倾向减仓或做空波段。
 - **接受低胜率**：方向段胜率仅 26.3%，但单次盈利远大于亏损（利润因子 6.87），依靠高不对称性盈利。
 - **三维共振入场**：只有方向信号、结构信号、资金费率信号同时出现时才加大仓位。
@@ -131,14 +134,14 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 ## 数据来源
 
 - 交易数据：[BTC-Trading-Since-2020](https://github.com/paulwei-coolish/BTC-Trading-Since-2020)（173,058 笔成交，2020–2026）
-- 实时行情：Binance USDT-M 永续合约公开 API（`fapi.binance.com`，无需 API Key）
+- 实时行情：Binance USDT-M 永续合约公开 API（`fapi.binance.com`，无需 API Key）；备用实时行情：OKX SWAP 公开 API（`www.okx.com/api/v5`，无需 API Key）
 - 实时账户看板：[wsnb.online](https://wsnb.online)
 
 ---
 
 ## 边界说明
 
-- 本 skill **不执行实际交易**，仅提供分析和建议
+- 本 skill **不执行实际交易**，仅提供教育性市场结构分析和风险校验
 - 相对强弱（BTC/NASDAQ 比率）需用户在 TradingView 手动确认，本 skill 不获取 NASDAQ 数据
 - MA30 ±10% 阈值基于 BTC 历史数据，用于其他币种为合理推断，非实证结论
 - **方向判断由用户主导**，本 skill 提供结构信息和风险校验，不替代判断

@@ -1,6 +1,6 @@
 ---
 name: paulwei-crypto
-description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s methodology — 6-year live record, 52x returns, 173,058 trades. Covers any Binance USDT-M perpetual futures pair (BTC, ETH, SOL, BNB, XRP, DOGE, and 400+ others). Three core scenarios: (1) Market structure analysis — live Binance data, MA deviations, ATR, 4h structure, key levels, funding rate bias; (2) Trading strategy formulation — entry zones, position sizing by account percentage, psychological order placement, exit plan; (3) Trade/strategy evaluation — checks against Paul Wei's risk framework (6 red lines, 7 warnings, improvement suggestions). Trigger whenever the user wants to analyze any crypto market, plan a trade, or validate a trade idea — even if they don't use trading jargon. Examples: analyze ETH, SOL 现在怎样, 我想做多BTC帮我计划, check my trade, 我账户1万怎么买SOL, 这笔交易合理吗, 分析一下币种行情, 帮我制定币种策略, 评估我的交易方案. Uses binance-cli (preferred) or curl (fallback) — Binance market data is public, no API key required."
+description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s methodology — 6-year live record, 52x returns, 173,058 trades. Covers USDT perpetual/swap pairs such as BTC, ETH, SOL, BNB, XRP, DOGE, and others. Three core scenarios: (1) Market structure analysis — live public market data, MA deviations, ATR, 4h structure, key levels, funding rate bias; (2) Trading strategy risk planning — entry watch zones, position sizing by account percentage, psychological order placement references, exit conditions; (3) Trade/strategy risk evaluation — checks against Paul Wei's risk framework (6 red lines, 7 warnings, improvement suggestions). Trigger whenever the user wants to analyze any crypto market, plan a trade, or validate a trade idea — even if they don't use trading jargon. Examples: analyze ETH, SOL 现在怎样, 我想做多BTC帮我计划, check my trade, 我账户1万怎么买SOL, 这笔交易合理吗, 分析一下币种行情, 帮我制定币种策略, 评估我的交易方案. Uses the bundled Python script with Binance public market data first and OKX public SWAP market data as fallback; no API key required. If all data sources fail, stop and explain the error."
 ---
 
 # Paul Wei (@coolish) 加密货币交易辅助系统
@@ -16,7 +16,7 @@ description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s me
 | 维度 | Paul Wei 的做法 | 与常见做法的差异 |
 |---|---|---|
 | **入场方式** | 挂限价单等价格来，建仓中位耗时 3.5 小时 | 不追价，不用市价单 |
-| **风控方式** | 靠仓位大小控风险，止损单使用率 <1% | 不依赖止损价，仓位本身就是护盾 |
+| **风控方式** | 以小仓位、失效条件和退出计划控风险，止损单使用率 <1% | 不能只依赖止损价，仓位上限本身也是护盾 |
 | **方向判断** | BTC/NASDAQ 比率 + MA30 偏离 + 4h 结构三维共振 | 不只看单一指标，不预测短期 |
 | **逆势思维** | MA30 偏低 >10% 时建多，偏高 >10% 时减仓/做空 | 反追高，等极端偏离 |
 | **胜率认知** | 方向段胜率仅 26%，靠利润因子（6.87）盈利 | 不追求高胜率，接受频繁小亏 |
@@ -29,31 +29,47 @@ description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s me
 
 ---
 
+## 强制安全边界
+
+本 skill 只能提供教育性市场结构分析和风险校验，**不构成投资建议，不替用户做交易决策，不执行实际交易**。任何入场区、仓位、杠杆、减仓位都必须表达为“风险参考/观察区”，不能表达为确定性收益或保证可执行方案。
+
+执行前必须遵守以下规则：
+
+- **不连接交易账户，不请求或保存 API Key，不生成下单代码。**
+- **不建议绕过交易所、地区、KYC、合规或服务条款限制。** 如果 Binance 返回 451/403/429/5xx，脚本可自动切换到 OKX 公共 SWAP 行情；如果所有合规公共数据源均失败，原样说明失败原因并停止制定策略。
+- **不处理未校验的 symbol。** 先把用户输入映射为 Binance USDT-M 合约 symbol，再确认满足 `^[A-Z0-9]{2,20}USDT$`；不满足则拒绝执行脚本。
+- **高风险请求只做降风险处理。** 对全仓、高杠杆、报复性交易、无退出条件、要求绕过限制等请求，必须明确标记高危，并只给降低仓位、降低杠杆、暂停交易或补充风险条件的方案。
+- **行情数据失败时失败关闭。** 不得用旧数据、猜测价格或手工兜底继续生成交易策略。
+
+---
+
 ## 前置：数据获取与品种识别
 
-### 数据获取（优先级顺序）
+### 数据获取
 
-Binance 行情 API 为公开接口，无需 API Key。按以下顺序尝试：
+Binance 和 OKX 行情 API 均为公开接口，无需 API Key。默认只使用内置脚本获取数据：脚本优先访问 Binance USDT-M，若 Binance 因地区限制、限流、网络或服务错误不可用，会自动切换到 OKX SWAP 公共行情。
 
-**方案 A（最优）：使用内置脚本**
 ```bash
 python3 scripts/analyze.py BTCUSDT
 ```
-脚本直接输出所有指标的 JSON（MA7/14/30、ATR14、枢轴点、4h趋势、资金费率、量比），Claude 无需手动计算。
+脚本直接输出所有指标的 JSON（数据源、MA7/14/30、ATR14、枢轴点、4h趋势、资金费率、量比），Claude 无需手动计算。
 
-**方案 B：binance-cli**（已安装时）
+安全执行要求：只在 symbol 已通过 `^[A-Z0-9]{2,20}USDT$` 校验后运行脚本；不要把用户原文直接拼进 shell 命令。
+
+代理说明：命令行 Python 进程通常只读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 等标准环境变量，不一定继承操作系统或客户端的“全局代理”。脚本会在 HTTP 451 错误里输出当前进程可见的代理摘要。仅可在合规网络和合规市场数据访问条件下配置代理；不得用代理绕过地区、KYC、交易所或服务条款限制。
+
+以下命令仅用于排查脚本本身不可运行的问题，不作为脚本失败后的手工兜底策略。若 Binance 和 OKX 均返回错误、地区限制、限流或网络失败，必须停止分析，不得用手工数据继续制定策略。
+
+**调试示例：binance-cli**（已安装时）
 ```bash
 binance-cli request GET https://fapi.binance.com/fapi/v1/klines \
   --symbol BTCUSDT --interval 1d --limit 90
 ```
 
-**方案 C：curl**（兜底）
+**调试示例：curl**
 ```bash
 curl -s "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=90"
 ```
-方案 B/C 需要 Claude 手动计算指标，结果与方案 A 等价但速度较慢。
-
-检测顺序：先尝试方案 A，失败则方案 B，再失败则方案 C。
 
 ### 现货用户说明
 
@@ -75,7 +91,7 @@ curl -s "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limi
 | `bnb` / `doge` / `xrp` / `ada` 等 | `BNBUSDT` / `DOGEUSDT` 等 |
 | 未指定 | 默认 `BTCUSDT`，并告知用户 |
 
-若 API 返回错误，说明该品种在 Binance 合约不存在，告知用户。
+若脚本返回 `error`，必须原样解释错误并停止后续策略制定。只有明确是交易对不存在时，才告知用户该品种不在支持的数据源；若是地区限制、限流、网络错误或服务端错误，不得建议绕过限制。
 
 ---
 
@@ -87,8 +103,9 @@ curl -s "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limi
 
 优先运行内置脚本（一次调用返回全部指标）：
 ```bash
-python3 scripts/analyze.py {SYMBOL}
+python3 scripts/analyze.py BTCUSDT
 ```
+上方 `BTCUSDT` 仅为示例。实际执行前必须完成品种映射和 symbol 白名单校验；校验失败则不执行。
 
 脚本内部并行获取以下数据：
 
@@ -139,6 +156,7 @@ python3 scripts/analyze.py {SYMBOL}
 📊 {SYMBOL} 市场结构  [{时间} UTC]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 当前价格  ${价格}  (24h {涨跌幅})
+数据源：{binance / okx}  合约：{实际交易所合约名}  {若使用 fallback，说明原因}
 
 【均线状态】
   MA7  ${价格}  偏差 {+/-X.X%}
@@ -237,6 +255,7 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📐 {SYMBOL} 交易策略  方向：{做多/做空}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+性质：教育性风险参考，不构成投资建议；用户需自行决策并遵守所在地和交易所规则
 账户规模：${账户}
 
 【入场规划】
@@ -251,7 +270,7 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 【仓位计划】（标准风险 0.5%）
   单笔最大亏损：${金额}
   
-  止损距离 1.5% → 名义 ${名义}（{X.X}x 杠杆）← 推荐起点
+  止损距离 1.5% → 名义 ${名义}（{X.X}x 杠杆）← 参考起点
   止损距离 2.0% → 名义 ${名义}（{X.X}x 杠杆）
 
   连错容忍：错5次亏2.5%，错10次亏5%（账户不崩溃）
@@ -264,7 +283,7 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 【不建议当前入场的原因】（如有）
   × {原因}
 
-⚠️ 仓位大小本身是风险控制，不依赖止损单触发
+⚠️ 不能只依赖止损单；必须同时设置仓位上限、结构失效条件和退出计划
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -313,6 +332,7 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔍 交易评估
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+性质：教育性风险校验，不构成投资建议；用户需自行决策并遵守所在地和交易所规则
 交易描述：{用户的交易方案一句话总结}
 市场背景：{币种} ${价格}，MA30偏差 {+/-X.X%}，{位置状态}
 
@@ -328,7 +348,7 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 
 【综合判断】
   风险等级：{低 / 中 / 高 / 极高}
-  建议：{可以执行 / 建议调整后执行 / 强烈不建议执行}
+  风险处置：{继续观察 / 降低风险后再评估 / 强烈不建议执行}
 
 【改良方案】
   保留方向判断，调整执行方式：
