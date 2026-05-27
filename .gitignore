@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# 本地 paper 交易运行账本，包含模拟账户状态，不提交到仓库。
+data/paper_state.json
+.agents/skills/paulwei-crypto/data/paper_state.json

@@ -13,7 +13,7 @@
         "4h trend direction is identified (上升/下降/横盘震荡)",
         "Funding rate is included with interpretation of who is paying",
         "Both 做多关注区 and 做空关注区 are provided with price ranges",
-        "Output fetches live public market data through the bundled script and identifies the actual provider (Binance or OKX)"
+        "Output fetches live public market data through the bundled script and identifies the actual provider plus fastest-success routing metadata (MEXC, Bitget, Binance, OKX, or Bybit)"
       ]
     },
     {
@@ -28,7 +28,7 @@
         "Stop distance in % is used to calculate nominal position size",
         "Exit plan includes at least two partial-close levels",
         "Output uses the ━━━━ bordered format with 📐 header",
-        "Output fetches live SOLUSDT-compatible perpetual/swap market data and identifies the actual provider (Binance or OKX)"
+        "Output fetches live SOLUSDT-compatible perpetual/swap market data and identifies the actual provider plus fastest-success routing metadata (MEXC, Bitget, Binance, OKX, or Bybit)"
       ]
     },
     {
@@ -43,7 +43,21 @@
         "Comprehensive risk level is rated 高 or 极高",
         "Improvement plan keeps long direction but reduces to compliant position size",
         "Output uses the ━━━━ bordered format with 🔍 header",
-        "Output fetches live ETHUSDT-compatible perpetual/swap market data for context and identifies the actual provider (Binance or OKX)"
+        "Output fetches live ETHUSDT-compatible perpetual/swap market data for context and identifies the actual provider plus fastest-success routing metadata (MEXC, Bitget, Binance, OKX, or Bybit)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "初始化一个500 USDT的BTC paper合约账户，然后生成一个BTC做空paper计划",
+      "expected_output": "The assistant uses scripts/paper_bot.py to initialize a local-only paper ledger and generate a BTCUSDT short paper plan or a wait/risk_locked JSON response. It must not request API keys, private keys, or execute real orders.",
+      "files": [],
+      "expectations": [
+        "Uses python3 scripts/paper_bot.py init --balance 500",
+        "Uses python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short",
+        "Output is valid JSON or a concise summary of valid JSON fields",
+        "Mentions that the bot is paper-only and does not connect to real accounts",
+        "If a placeable plan is returned, includes plan_id, entries, stop_loss, take_profits, max_loss_usdt, required_margin_usdt, and total_contracts",
+        "If status is wait or risk_locked, explains the risk reason without forcing a trade"
       ]
     }
   ]

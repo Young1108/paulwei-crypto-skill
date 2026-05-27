@@ -69,3 +69,43 @@
 2. 再修 `SKILL.md`：安全调用约束、行情不可用时失败关闭、金融免责声明和合规边界。
 3. 清理 `references/framework.md` 中的绝对路径。
 4. 增加 eval：恶意 symbol、无效 symbol、HTTP 451/429、空数组响应、高杠杆交易评估。
+
+---
+
+# BTC Paper 机器人完善审查
+
+- 生成时间：2026-05-27 11:29（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，保留 v1 范围限制
+- 综合评分：86/100
+
+## 已修复问题
+
+1. `tick` 幂等性不足：新增 `last_processed_candle_time`，同一根 1 分钟 K 线重复 tick 时只刷新权益，不重复成交、止盈或止损。
+2. 同根 K 线乐观成交：新挂单记录 `created_candle_time`，不会用创建所在 K 线已经发生过的 high/low 触发成交。
+3. 缺少取消控制：新增 CLI `cancel`、API `/api/cancel` 和前端“取消草案/挂单”按钮。
+4. 计划过期未执行：新增草案和开放入场挂单过期失效处理。
+5. 旧账本迁移：缺少 `expires_at` 的旧开放挂单按 `created_at + 4小时` 自动过期。
+6. 状态可观测性不足：`status` 输出行情状态、行情延迟、上次 tick、上次 K 线、上次账本动作。
+
+## 验证记录
+
+- `python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py`：12 个测试通过。
+- `python3 scripts/paper_bot.py status`：通过，MEXC 行情 `market_status=live`，行情延迟约 2.7 秒。
+- `curl http://127.0.0.1:8787/api/health`：通过。
+- 浏览器打开 `http://127.0.0.1:8787`：页面显示“取消草案/挂单”、行情状态、BTC 实时价和 paper-only 提示。
+- 已安装 skill 目录 `paper_bot.py` 与 `paper_server.py` 编译通过。
+- 已安装 skill 目录 `status --no-market`：通过。
+
+## 剩余不足
+
+- v1 仍只支持 BTCUSDT/MEXC/paper-only。
+- 暂无权益曲线、订单历史详情、策略参数回测。
+- 前端只自动刷新状态，不自动推进 `tick`；如需无人值守 paper，需要单独设计定时 tick 和失败告警。
+- 当前策略只覆盖做空草案，未实现多头策略与横盘不交易的更细粒度规则。
+
+## 建议
+
+通过当前 v1 完善项。下一阶段应优先补历史页面、权益曲线、定时 tick 与失败告警，不应接入真实账户或密钥。

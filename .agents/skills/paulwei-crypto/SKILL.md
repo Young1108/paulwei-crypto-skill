@@ -1,6 +1,6 @@
 ---
 name: paulwei-crypto
-description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s methodology — 6-year live record, 52x returns, 173,058 trades. Covers USDT perpetual/swap pairs such as BTC, ETH, SOL, BNB, XRP, DOGE, and others. Three core scenarios: (1) Market structure analysis — live public market data, MA deviations, ATR, 4h structure, key levels, funding rate bias; (2) Trading strategy risk planning — entry watch zones, position sizing by account percentage, psychological order placement references, exit conditions; (3) Trade/strategy risk evaluation — checks against Paul Wei's risk framework (6 red lines, 7 warnings, improvement suggestions). Trigger whenever the user wants to analyze any crypto market, plan a trade, or validate a trade idea — even if they don't use trading jargon. Examples: analyze ETH, SOL 现在怎样, 我想做多BTC帮我计划, check my trade, 我账户1万怎么买SOL, 这笔交易合理吗, 分析一下币种行情, 帮我制定币种策略, 评估我的交易方案. Uses the bundled Python script with Binance public market data first and OKX public SWAP market data as fallback; no API key required. If all data sources fail, stop and explain the error."
+description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s methodology — 6-year live record, 52x returns, 173,058 trades. Covers USDT perpetual/swap pairs such as BTC, ETH, SOL, BNB, XRP, DOGE, and others. Four core scenarios: (1) Market structure analysis — live public market data, MA deviations, ATR, 4h structure, key levels, funding rate bias; (2) Trading strategy risk planning — entry watch zones, position sizing by account percentage, psychological order placement references, exit conditions; (3) Trade/strategy risk evaluation — checks against Paul Wei's risk framework (6 red lines, 7 warnings, improvement suggestions); (4) BTC MEXC paper futures bot — local-only simulated ledger, order drafts, paper fills, and risk locks with no API key or real execution. Trigger whenever the user wants to analyze any crypto market, plan a trade, validate a trade idea, or run paper trading — even if they don't use trading jargon. Examples: analyze ETH, SOL 现在怎样, 我想做多BTC帮我计划, check my trade, 我账户1万怎么买SOL, 这笔交易合理吗, 分析一下币种行情, 帮我制定币种策略, 评估我的交易方案, 初始化paper交易, paper bot status. Uses bundled Python scripts with fastest-success public market routing and MEXC paper simulation; no API key required. If all data sources fail, stop and explain the error."
 ---
 
 # Paul Wei (@coolish) 加密货币交易辅助系统
@@ -36,7 +36,8 @@ description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s me
 执行前必须遵守以下规则：
 
 - **不连接交易账户，不请求或保存 API Key，不生成下单代码。**
-- **不建议绕过交易所、地区、KYC、合规或服务条款限制。** 如果 Binance 返回 451/403/429/5xx，脚本可自动切换到 OKX 公共 SWAP 行情；如果所有合规公共数据源均失败，原样说明失败原因并停止制定策略。
+- **Paper 交易只做本地模拟。** `scripts/paper_bot.py` 只能写入 `data/paper_state.json` 本地模拟账本；不得把 paper 计划改写成真实下单或签名流程。
+- **不建议绕过交易所、地区、KYC、合规或服务条款限制。** 脚本只在 MEXC、Bitget、Binance、OKX、Bybit 的公开行情源之间做最快可用路由；如果所有合规公共数据源均失败，原样说明失败原因并停止制定策略。
 - **不处理未校验的 symbol。** 先把用户输入映射为 Binance USDT-M 合约 symbol，再确认满足 `^[A-Z0-9]{2,20}USDT$`；不满足则拒绝执行脚本。
 - **高风险请求只做降风险处理。** 对全仓、高杠杆、报复性交易、无退出条件、要求绕过限制等请求，必须明确标记高危，并只给降低仓位、降低杠杆、暂停交易或补充风险条件的方案。
 - **行情数据失败时失败关闭。** 不得用旧数据、猜测价格或手工兜底继续生成交易策略。
@@ -47,7 +48,7 @@ description: "Crypto futures trading assistant based on Paul Wei (@coolish)'s me
 
 ### 数据获取
 
-Binance 和 OKX 行情 API 均为公开接口，无需 API Key。默认只使用内置脚本获取数据：脚本优先访问 Binance USDT-M，若 Binance 因地区限制、限流、网络或服务错误不可用，会自动切换到 OKX SWAP 公共行情。
+MEXC、Bitget、Binance、OKX、Bybit 行情 API 均为公开接口，无需 API Key。默认只使用内置脚本获取数据：脚本会并发竞速多个 USDT 永续/Swap 公共行情源，采用最快返回完整有效数据的来源。默认请求客户端优先使用系统 `curl`，无 `curl` 时回退到 Python `urllib`；默认请求级超时为 `2.5s`，整体路由窗口为 `4.5s`，默认 `PAULWEI_MARKET_PROXY_MODE=direct` 避免系统代理拖慢请求。可通过 `PAULWEI_MARKET_REQUEST_TIMEOUT`、`PAULWEI_MARKET_ROUTE_TIMEOUT`、`PAULWEI_MARKET_PROVIDERS`、`PAULWEI_MARKET_PROXY_MODE` 和 `PAULWEI_MARKET_HTTP_CLIENT` 调整。
 
 ```bash
 python3 scripts/analyze.py BTCUSDT
@@ -58,7 +59,7 @@ python3 scripts/analyze.py BTCUSDT
 
 代理说明：命令行 Python 进程通常只读取 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 等标准环境变量，不一定继承操作系统或客户端的“全局代理”。脚本会在 HTTP 451 错误里输出当前进程可见的代理摘要。仅可在合规网络和合规市场数据访问条件下配置代理；不得用代理绕过地区、KYC、交易所或服务条款限制。
 
-以下命令仅用于排查脚本本身不可运行的问题，不作为脚本失败后的手工兜底策略。若 Binance 和 OKX 均返回错误、地区限制、限流或网络失败，必须停止分析，不得用手工数据继续制定策略。
+以下命令仅用于排查脚本本身不可运行的问题，不作为脚本失败后的手工兜底策略。若 MEXC、Bitget、Binance、OKX、Bybit 均返回错误、地区限制、限流或网络失败，必须停止分析，不得用手工数据继续制定策略。
 
 **调试示例：binance-cli**（已安装时）
 ```bash
@@ -111,11 +112,9 @@ python3 scripts/analyze.py BTCUSDT
 
 | 接口 | 参数 | 用途 |
 |---|---|---|
-| `/fapi/v1/klines` | interval=1d, limit=90 | MA / ATR / 30日区间 / 枢轴点 |
-| `/fapi/v1/klines` | interval=4h, limit=60 | 近10天结构 / 入场区精度 |
-| `/fapi/v1/klines` | interval=1w, limit=30 | 周线趋势背景 / 周线MA30 |
-| `/fapi/v1/ticker/24hr` | symbol={SYMBOL} | 当前价 / 24h涨跌 / 成交量 |
-| `/fapi/v1/fundingRate` | symbol={SYMBOL}, limit=8 | 近2.7天资金费率偏向 |
+| K线接口 | 1d/4h/1w，90/60/30根 | MA / ATR / 30日区间 / 枢轴点 / 周线背景 |
+| ticker 接口 | symbol={SYMBOL} | 当前价 / 24h涨跌 / 成交量 |
+| funding 接口 | symbol={SYMBOL}, limit=8 | 近2.7天资金费率偏向 |
 
 ### 计算指标
 
@@ -156,7 +155,7 @@ python3 scripts/analyze.py BTCUSDT
 📊 {SYMBOL} 市场结构  [{时间} UTC]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 当前价格  ${价格}  (24h {涨跌幅})
-数据源：{binance / okx}  合约：{实际交易所合约名}  {若使用 fallback，说明原因}
+数据源：{mexc / bitget / binance / okx / bybit}  合约：{实际交易所合约名}  路由：{最快可用来源、耗时、失败/未完成来源}
 
 【均线状态】
   MA7  ${价格}  偏差 {+/-X.X%}
@@ -355,6 +354,64 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
   {具体修改：调整仓位大小、分批方式、挂单位置、出场条件等}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+---
+
+## 场景四：BTC Paper 合约机器人
+
+**适用场景**：用户想在不连接真实账户的情况下，用 MEXC BTC_USDT 实时行情验证策略表现。
+
+### 命令
+
+```bash
+python3 scripts/paper_bot.py init --balance 500
+python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
+python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
+python3 scripts/paper_bot.py cancel --all
+python3 scripts/paper_bot.py tick
+python3 scripts/paper_bot.py status
+```
+
+### 本地前端
+
+```bash
+python3 scripts/paper_server.py --host 127.0.0.1 --port 8787
+```
+
+打开 `http://127.0.0.1:8787` 后，可在界面里执行初始化、生成草案、确认模拟挂单、tick 和状态刷新。
+
+最小使用流程：
+1. 重置 500U 模拟账户。
+2. 生成做空草案。
+3. 接受草案风险后确认为模拟挂单。
+4. 不想继续等待时取消草案/挂单。
+5. 持续刷新行情并模拟成交。
+
+界面显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、挂单距现价，并每 15 秒自动刷新。若挂单离现价较远，说明策略在等待反弹到限价区，并不代表数据未更新。
+
+### 强制边界
+
+- v1 只支持 `BTCUSDT` / MEXC `BTC_USDT`。
+- 不读取、不保存、不打印私钥、助记词、交易所 API Key。
+- 不连接真实账户，不调用真实下单接口。
+- `propose` 只生成订单草案；`place` 只把草案放入 paper 账本。
+- `cancel` 只取消待确认草案或开放模拟挂单，不影响真实账户。
+- `tick` 对同一根 1 分钟 K 线幂等，重复点击不得重复成交或重复止盈止损。
+- 新挂单不得使用创建所在 K 线的历史 high/low 触发乐观成交。
+- 草案和开放入场挂单过期后必须自动失效。
+- 如果日内累计亏损达到账户 `2%`，`propose` 必须返回 `risk_locked`。
+
+### 默认风控
+
+| 参数 | 默认值 |
+|---|---|
+| 初始虚拟资金 | 500 USDT |
+| 单笔标准风险 | 0.5% |
+| 单笔最大风险 | 1% |
+| 最大模拟杠杆 | 3x |
+| BTC_USDT contractSize | 0.0001 BTC |
+| minVol / volUnit | 1 / 1 |
+| priceUnit | 0.1 |
 
 ---
 

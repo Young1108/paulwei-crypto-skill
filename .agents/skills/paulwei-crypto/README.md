@@ -24,7 +24,7 @@ npx skills add https://github.com/hanniballei/paulwei-crypto-skill
 
 ## 支持的品种
 
-支持常见 **USDT 永续/Swap 合约**。脚本优先使用 Binance USDT-M 公共行情；若 Binance 不可用，会自动切换到 OKX SWAP 公共行情。
+支持常见 **USDT 永续/Swap 合约**。脚本会并发竞速 MEXC、Bitget、Binance USDT-M、OKX SWAP、Bybit USDT linear 公共行情，使用最快返回完整有效数据的合规数据源。
 
 BTC / ETH / SOL / BNB / XRP / DOGE / ADA / AVAX / LINK / DOT … 及 400+ 其他合约品种。
 
@@ -98,6 +98,46 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 - 综合风险等级 & 执行建议
 - 改良方案（保留方向，调整执行）
 
+### 场景四：BTC Paper 合约机器人
+
+用真实 MEXC BTC_USDT 行情模拟合约交易，不连接真实账户，不需要 API Key，不下真实订单。
+
+**命令示例**：
+```bash
+python3 scripts/paper_bot.py init --balance 500
+python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
+python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
+python3 scripts/paper_bot.py cancel --all
+python3 scripts/paper_bot.py tick
+python3 scripts/paper_bot.py status
+```
+
+**本地前端**：
+```bash
+python3 scripts/paper_server.py --host 127.0.0.1 --port 8787
+```
+
+然后打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。
+
+界面按最小流程使用：
+1. 需要重开模拟时点“重置 500U 模拟账户”。
+2. 点“生成做空草案”，系统会判断是否值得模拟。
+3. 有草案且你接受风险时，点“确认为模拟挂单”。
+4. 不想继续等待时，点“取消草案/挂单”。
+5. 之后只需要点“刷新行情并模拟成交”，查看挂单、持仓和权益变化。
+
+前端会显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态和挂单距现价，并每 15 秒自动刷新状态。若挂单距现价较远，模拟成交不会发生，这是策略等待反弹触发，不是行情失效。
+
+**v1 限制**：
+- 只支持 `BTCUSDT` / MEXC `BTC_USDT`
+- 只支持 paper 模拟，不支持真实下单或 CEX API 签名
+- 单笔标准风险 `0.5%`，单笔最大风险 `1%`
+- 最大模拟杠杆 `3x`
+- 日内累计亏损达到 `2%` 后停止生成新计划
+- `tick` 对同一根 1 分钟 K 线幂等：重复点击只刷新权益，不重复成交或止盈止损
+- 新挂单不会用创建所在 K 线的历史 high/low 乐观成交
+- 草案和开放入场挂单过期后会自动失效
+
 ---
 
 ## Paul Wei 的交易风格
@@ -134,14 +174,35 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 ## 数据来源
 
 - 交易数据：[BTC-Trading-Since-2020](https://github.com/paulwei-coolish/BTC-Trading-Since-2020)（173,058 笔成交，2020–2026）
-- 实时行情：Binance USDT-M 永续合约公开 API（`fapi.binance.com`，无需 API Key）；备用实时行情：OKX SWAP 公开 API（`www.okx.com/api/v5`，无需 API Key）
+- 实时行情：并发竞速 MEXC（`contract.mexc.com`）、Bitget（`api.bitget.com`）、Binance USDT-M（`fapi.binance.com`）、OKX SWAP（`www.okx.com/api/v5`）、Bybit USDT linear（`api.bybit.com/v5`）公开 API；无需 API Key
 - 实时账户看板：[wsnb.online](https://wsnb.online)
+
+### 行情路由参数
+
+默认请求客户端优先使用系统 `curl`，无 `curl` 时回退到 Python `urllib`。默认请求级超时为 `2.5s`，整体路由窗口为 `4.5s`，默认直连公共行情源以避免本机系统代理拖慢请求。可用环境变量调整：
+
+```bash
+PAULWEI_MARKET_REQUEST_TIMEOUT=2.0 PAULWEI_MARKET_ROUTE_TIMEOUT=4.0 python3 scripts/analyze.py BTCUSDT
+```
+
+如需限制数据源：
+
+```bash
+PAULWEI_MARKET_PROVIDERS=okx,bybit python3 scripts/analyze.py BTCUSDT
+```
+
+如需强制走系统代理或强制使用 `urllib`：
+
+```bash
+PAULWEI_MARKET_PROXY_MODE=system PAULWEI_MARKET_HTTP_CLIENT=urllib python3 scripts/analyze.py BTCUSDT
+```
 
 ---
 
 ## 边界说明
 
 - 本 skill **不执行实际交易**，仅提供教育性市场结构分析和风险校验
+- Paper 机器人只写入本地 `data/paper_state.json` 模拟账本，不保存任何真实账户凭据
 - 相对强弱（BTC/NASDAQ 比率）需用户在 TradingView 手动确认，本 skill 不获取 NASDAQ 数据
 - MA30 ±10% 阈值基于 BTC 历史数据，用于其他币种为合理推断，非实证结论
 - **方向判断由用户主导**，本 skill 提供结构信息和风险校验，不替代判断

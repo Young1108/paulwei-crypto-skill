@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BTC Paper 交易</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">MEXC BTC_USDT · Paper Only</p>
+        <h1>BTC 模拟交易</h1>
+      </div>
+      <div class="status-pill" id="connectionStatus">连接中</div>
+    </header>
+
+    <main class="shell">
+      <section class="panel focus">
+        <div class="paper-warning">
+          <strong>只做模拟</strong>
+          <span>不会连接真实账户，不需要 API Key，不会真实下单。</span>
+        </div>
+
+        <div class="next-step">
+          <p class="eyebrow">下一步</p>
+          <h2 id="nextStepTitle">读取状态中</h2>
+          <p id="nextStepText">正在连接本地 paper 账本。</p>
+          <p class="data-line" id="dataStatusText">行情状态：读取中</p>
+        </div>
+
+        <div class="actions">
+          <button id="initBtn" class="secondary">重置 500U 模拟账户</button>
+          <button id="proposeBtn" class="primary">生成做空草案</button>
+          <button id="placeBtn">确认为模拟挂单</button>
+          <button id="tickBtn">刷新行情并模拟成交</button>
+          <button id="cancelBtn" class="danger">取消草案/挂单</button>
+        </div>
+
+        <details class="advanced">
+          <summary>高级设置</summary>
+          <div class="settings">
+            <label class="field">
+              <span>虚拟资金</span>
+              <input id="balanceInput" type="number" value="500" min="1" step="1">
+            </label>
+            <label class="field">
+              <span>风险比例</span>
+              <select id="riskInput">
+                <option value="0.005">0.5% 标准</option>
+                <option value="0.0025">0.25% 试探</option>
+                <option value="0.01">1.0% 激进</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>杠杆</span>
+              <select id="leverageInput">
+                <option value="3">3x</option>
+                <option value="2">2x</option>
+                <option value="1">1x</option>
+              </select>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <section class="summary-grid">
+        <article class="metric market-metric">
+          <span>BTC 实时价</span>
+          <strong id="marketPriceValue">--</strong>
+        </article>
+        <article class="metric">
+          <span>24h 涨跌</span>
+          <strong id="marketChangeValue">--</strong>
+        </article>
+        <article class="metric">
+          <span>权益</span>
+          <strong id="equityValue">--</strong>
+        </article>
+        <article class="metric">
+          <span>日内盈亏</span>
+          <strong id="dailyPnlValue">--</strong>
+        </article>
+        <article class="metric">
+          <span>最大回撤</span>
+          <strong id="drawdownValue">--</strong>
+        </article>
+        <article class="metric">
+          <span>风控状态</span>
+          <strong id="riskValue">--</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>当前草案</h2>
+          <span id="planBadge">0</span>
+        </div>
+        <div id="plansView" class="empty">暂无草案</div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>持仓 / 挂单</h2>
+          <button id="refreshBtn" class="ghost">刷新</button>
+        </div>
+        <div id="positionsView" class="empty">暂无持仓</div>
+        <div id="ordersView"></div>
+      </section>
+
+      <details class="panel log-panel">
+        <summary>技术日志</summary>
+        <div class="section-head nested">
+          <h2>最近事件</h2>
+          <button id="clearLogBtn" class="ghost">清空</button>
+        </div>
+        <pre id="logView" class="log"></pre>
+      </details>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

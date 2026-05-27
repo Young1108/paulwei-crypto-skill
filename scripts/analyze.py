@@ -13,17 +13,45 @@ Usage:
 
 import json
 import os
+import queue
 import re
+import shutil
+import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, getproxies, urlopen
+from urllib.request import Request, ProxyHandler, build_opener, getproxies, urlopen
 
 
 BINANCE_API_BASE = "https://fapi.binance.com/fapi/v1"
 OKX_API_BASE = "https://www.okx.com/api/v5"
+BYBIT_API_BASE = "https://api.bybit.com/v5"
+MEXC_API_BASE = "https://contract.mexc.com/api/v1"
+BITGET_API_BASE = "https://api.bitget.com/api/v2"
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}USDT$")
+DEFAULT_PROVIDERS = ("mexc", "bitget", "binance", "okx", "bybit")
+
+
+def env_float(name, default):
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MARKET_REQUEST_TIMEOUT = env_float("PAULWEI_MARKET_REQUEST_TIMEOUT", 2.5)
+MARKET_ROUTE_TIMEOUT = env_float("PAULWEI_MARKET_ROUTE_TIMEOUT", 4.5)
+MARKET_PROXY_MODE = os.environ.get("PAULWEI_MARKET_PROXY_MODE", "direct").strip().lower()
+MARKET_HTTP_CLIENT = os.environ.get("PAULWEI_MARKET_HTTP_CLIENT", "curl").strip().lower()
+DIRECT_OPENER = build_opener(ProxyHandler({}))
 
 
 class DataFetchError(Exception):
@@ -46,11 +74,11 @@ def normalize_symbol(raw_symbol):
     return symbol
 
 
-def parse_json_body(body):
+def parse_json_body(provider, body):
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
-        raise DataFetchError("Binance returned a non-JSON response.") from exc
+        raise DataFetchError(f"{provider} returned a non-JSON response.") from exc
 
 
 def proxy_summary():
@@ -94,14 +122,68 @@ def format_http_error(provider, endpoint, status_code, body):
     return f"{provider} request failed for {endpoint} (HTTP {status_code}): {msg}"
 
 
-def http_get_json(provider, base_url, endpoint, **params):
-    """通过公开行情接口获取 JSON 数据。"""
-    url = f"{base_url}/{endpoint}?{urlencode(params)}"
-    req = Request(url, headers={"User-Agent": "paulwei-crypto-skill/1.0"})
+def http_get_body_with_curl(provider, endpoint, url, timeout):
+    """使用 curl 快速请求，避免 urllib 在部分本机代理/IPv6 环境下长时间卡住。"""
+    if not shutil.which("curl"):
+        raise DataFetchError("curl is not available")
+
+    command = [
+        "curl", "-sS", "--compressed",
+        "--max-time", str(timeout),
+        "-A", "paulwei-crypto-skill/1.0",
+        "-w", "\n%{http_code}",
+    ]
+    if MARKET_PROXY_MODE == "direct":
+        command.extend(["--noproxy", "*"])
+    elif MARKET_PROXY_MODE != "system":
+        raise DataFetchError("Invalid PAULWEI_MARKET_PROXY_MODE. Use 'direct' or 'system'.")
+    command.append(url)
 
     try:
-        with urlopen(req, timeout=15) as response:
-            body = response.read().decode("utf-8")
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 0.8,
+            check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DataFetchError(f"{provider} timed out while fetching {endpoint}.") from exc
+
+    stdout = completed.stdout or ""
+    if "\n" not in stdout:
+        reason = (completed.stderr or "").strip() or f"curl exit code {completed.returncode}"
+        raise DataFetchError(f"{provider} network error while fetching {endpoint}: {reason}")
+
+    body, status_text = stdout.rsplit("\n", 1)
+    try:
+        status_code = int(status_text)
+    except ValueError as exc:
+        raise DataFetchError(f"{provider} returned an invalid HTTP status: {status_text}") from exc
+
+    if completed.returncode != 0:
+        reason = (completed.stderr or "").strip() or f"curl exit code {completed.returncode}"
+        if status_code >= 400:
+            raise DataFetchError(format_http_error(provider, endpoint, status_code, body))
+        raise DataFetchError(f"{provider} network error while fetching {endpoint}: {reason}")
+
+    if status_code >= 400:
+        raise DataFetchError(format_http_error(provider, endpoint, status_code, body))
+    return body
+
+
+def http_get_body_with_urllib(provider, endpoint, url, timeout):
+    """使用 Python urllib 请求，保留为无 curl 环境的后备路径。"""
+    req = Request(url, headers={"User-Agent": "paulwei-crypto-skill/1.0"})
+    try:
+        if MARKET_PROXY_MODE == "system":
+            response_context = urlopen(req, timeout=timeout)
+        elif MARKET_PROXY_MODE == "direct":
+            response_context = DIRECT_OPENER.open(req, timeout=timeout)
+        else:
+            raise DataFetchError("Invalid PAULWEI_MARKET_PROXY_MODE. Use 'direct' or 'system'.")
+        with response_context as response:
+            return response.read().decode("utf-8")
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise DataFetchError(format_http_error(provider, endpoint, exc.code, body)) from exc
@@ -110,12 +192,33 @@ def http_get_json(provider, base_url, endpoint, **params):
     except TimeoutError as exc:
         raise DataFetchError(f"{provider} timed out while fetching {endpoint}.") from exc
 
-    return parse_json_body(body)
+def http_get_json(provider, base_url, endpoint, request_timeout=None, **params):
+    """通过公开行情接口获取 JSON 数据。"""
+    query = urlencode(params)
+    url = f"{base_url}/{endpoint}?{query}" if query else f"{base_url}/{endpoint}"
+    timeout = request_timeout or MARKET_REQUEST_TIMEOUT
+
+    if MARKET_HTTP_CLIENT == "curl":
+        try:
+            body = http_get_body_with_curl(provider, endpoint, url, timeout)
+        except DataFetchError as exc:
+            if "curl is not available" not in str(exc):
+                raise
+            body = http_get_body_with_urllib(provider, endpoint, url, timeout)
+    elif MARKET_HTTP_CLIENT == "urllib":
+        body = http_get_body_with_urllib(provider, endpoint, url, timeout)
+    else:
+        raise DataFetchError("Invalid PAULWEI_MARKET_HTTP_CLIENT. Use 'curl' or 'urllib'.")
+
+    return parse_json_body(provider, body)
 
 
-def fetch_binance(endpoint, **params):
+def fetch_binance(endpoint, request_timeout=None, **params):
     """通过 Binance USDT-M 公开行情接口获取 JSON 数据。"""
-    data = http_get_json("Binance", BINANCE_API_BASE, endpoint, **params)
+    data = http_get_json(
+        "Binance", BINANCE_API_BASE, endpoint,
+        request_timeout=request_timeout, **params
+    )
     if isinstance(data, dict) and "code" in data:
         code = data.get("code")
         msg = data.get("msg", "")
@@ -128,9 +231,12 @@ def fetch_binance(endpoint, **params):
     return data
 
 
-def fetch_okx(endpoint, **params):
+def fetch_okx(endpoint, request_timeout=None, **params):
     """通过 OKX SWAP 公开行情接口获取 data 字段。"""
-    payload = http_get_json("OKX", OKX_API_BASE, endpoint, **params)
+    payload = http_get_json(
+        "OKX", OKX_API_BASE, endpoint,
+        request_timeout=request_timeout, **params
+    )
     if not isinstance(payload, dict):
         raise DataFetchError(f"OKX response for {endpoint} is malformed.")
 
@@ -148,10 +254,77 @@ def fetch_okx(endpoint, **params):
     return data
 
 
+def fetch_bybit(endpoint, request_timeout=None, **params):
+    """通过 Bybit USDT linear 公共行情接口获取 result 字段。"""
+    payload = http_get_json(
+        "Bybit", BYBIT_API_BASE, endpoint,
+        request_timeout=request_timeout, **params
+    )
+    if not isinstance(payload, dict):
+        raise DataFetchError(f"Bybit response for {endpoint} is malformed.")
+
+    code = payload.get("retCode")
+    msg = payload.get("retMsg", "")
+    if code != 0:
+        symbol = params.get("symbol", "symbol")
+        if code in (10001, 10029) or "symbol" in msg.lower():
+            raise DataFetchError(f"{symbol} not found on Bybit USDT linear market.")
+        raise DataFetchError(f"Bybit API error for {endpoint}: code={code}, msg={msg}")
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise DataFetchError(f"Bybit response for {endpoint} is missing result.")
+    return result
+
+
+def fetch_mexc(endpoint, request_timeout=None, **params):
+    """通过 MEXC USDT 永续公共行情接口获取 data 字段。"""
+    payload = http_get_json(
+        "MEXC", MEXC_API_BASE, endpoint,
+        request_timeout=request_timeout, **params
+    )
+    if not isinstance(payload, dict):
+        raise DataFetchError(f"MEXC response for {endpoint} is malformed.")
+
+    success = payload.get("success")
+    code = payload.get("code")
+    message = payload.get("message") or payload.get("msg") or ""
+    if success is not True or code not in (0, "0", None):
+        raise DataFetchError(f"MEXC API error for {endpoint}: code={code}, msg={message}")
+
+    if "data" not in payload:
+        raise DataFetchError(f"MEXC response for {endpoint} is missing data.")
+    return payload["data"]
+
+
+def fetch_bitget(endpoint, request_timeout=None, **params):
+    """通过 Bitget USDT futures 公共行情接口获取 data 字段。"""
+    payload = http_get_json(
+        "Bitget", BITGET_API_BASE, endpoint,
+        request_timeout=request_timeout, **params
+    )
+    if not isinstance(payload, dict):
+        raise DataFetchError(f"Bitget response for {endpoint} is malformed.")
+
+    code = payload.get("code")
+    msg = payload.get("msg", "")
+    if code != "00000":
+        raise DataFetchError(f"Bitget API error for {endpoint}: code={code}, msg={msg}")
+
+    if "data" not in payload:
+        raise DataFetchError(f"Bitget response for {endpoint} is missing data.")
+    return payload["data"]
+
+
 def okx_inst_id(symbol):
     """将 BTCUSDT 转换为 OKX SWAP 的 BTC-USDT-SWAP。"""
     base = symbol[:-4]
     return f"{base}-USDT-SWAP"
+
+
+def mexc_symbol(symbol):
+    """将 BTCUSDT 转换为 MEXC 永续合约 BTC_USDT。"""
+    return f"{symbol[:-4]}_USDT"
 
 
 def normalize_okx_candles(rows):
@@ -166,17 +339,79 @@ def normalize_okx_candles(rows):
     return normalized
 
 
-def fetch_market_data_binance(symbol):
+def normalize_bybit_candles(rows):
+    """将 Bybit K 线转换为脚本内部使用的 Binance K 线形状。"""
+    normalized = []
+    for row in rows:
+        if len(row) < 6:
+            raise DataFetchError("Bybit candle response contains malformed rows.")
+        ts, open_, high, low, close, volume = row[:6]
+        normalized.append([int(ts), open_, high, low, close, volume])
+    normalized.sort(key=lambda row: row[0])
+    return normalized
+
+
+def normalize_mexc_candles(data):
+    """将 MEXC K 线字典转换为脚本内部使用的 Binance K 线形状。"""
+    if not isinstance(data, dict):
+        raise DataFetchError("MEXC candle response is malformed.")
+    required = ["time", "open", "high", "low", "close", "vol"]
+    missing = [key for key in required if key not in data or not isinstance(data[key], list)]
+    if missing:
+        raise DataFetchError(f"MEXC candle response is missing fields: {', '.join(missing)}")
+
+    lengths = [len(data[key]) for key in required]
+    if not lengths or min(lengths) != max(lengths):
+        raise DataFetchError("MEXC candle response contains inconsistent array lengths.")
+
+    normalized = []
+    for ts, open_, high, low, close, volume in zip(
+        data["time"], data["open"], data["high"], data["low"], data["close"], data["vol"]
+    ):
+        normalized.append([int(ts) * 1000, open_, high, low, close, volume])
+    normalized.sort(key=lambda row: row[0])
+    return normalized
+
+
+def normalize_bitget_candles(rows):
+    """将 Bitget K 线转换为脚本内部使用的 Binance K 线形状。"""
+    normalized = []
+    for row in rows:
+        if len(row) < 6:
+            raise DataFetchError("Bitget candle response contains malformed rows.")
+        ts, open_, high, low, close, volume = row[:6]
+        normalized.append([int(ts), open_, high, low, close, volume])
+    normalized.sort(key=lambda row: row[0])
+    return normalized
+
+
+def fetch_market_data_binance(symbol, request_timeout=None):
     """获取 Binance USDT-M 行情，并统一成内部数据结构。"""
-    klines_1d = require_list("daily klines", fetch_binance("klines", symbol=symbol, interval="1d", limit=90), 30)
-    klines_4h = require_list("4h klines", fetch_binance("klines", symbol=symbol, interval="4h", limit=60), 20)
-    klines_1w = require_list("weekly klines", fetch_binance("klines", symbol=symbol, interval="1w", limit=30), 1)
+    klines_1d = require_list(
+        "daily klines",
+        fetch_binance("klines", request_timeout=request_timeout, symbol=symbol, interval="1d", limit=90),
+        30
+    )
+    klines_4h = require_list(
+        "4h klines",
+        fetch_binance("klines", request_timeout=request_timeout, symbol=symbol, interval="4h", limit=60),
+        20
+    )
+    klines_1w = require_list(
+        "weekly klines",
+        fetch_binance("klines", request_timeout=request_timeout, symbol=symbol, interval="1w", limit=30),
+        1
+    )
     ticker = require_dict_fields(
         "24hr ticker",
-        fetch_binance("ticker/24hr", symbol=symbol),
+        fetch_binance("ticker/24hr", request_timeout=request_timeout, symbol=symbol),
         ["lastPrice", "priceChangePercent", "volume"]
     )
-    funding = require_list("funding rate", fetch_binance("fundingRate", symbol=symbol, limit=8), 0)
+    funding = require_list(
+        "funding rate",
+        fetch_binance("fundingRate", request_timeout=request_timeout, symbol=symbol, limit=8),
+        0
+    )
     return {
         "source": "binance",
         "instrument": symbol,
@@ -189,26 +424,39 @@ def fetch_market_data_binance(symbol):
     }
 
 
-def fetch_market_data_okx(symbol, fallback_reason=None):
+def fetch_market_data_okx(symbol, fallback_reason=None, request_timeout=None):
     """获取 OKX SWAP 行情，并统一成内部数据结构。"""
     inst_id = okx_inst_id(symbol)
     candles_1d = require_list(
         "OKX daily candles",
-        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="1D", limit=90)),
+        normalize_okx_candles(fetch_okx(
+            "market/candles", request_timeout=request_timeout,
+            instId=inst_id, bar="1D", limit=90
+        )),
         30
     )
     candles_4h = require_list(
         "OKX 4h candles",
-        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="4H", limit=60)),
+        normalize_okx_candles(fetch_okx(
+            "market/candles", request_timeout=request_timeout,
+            instId=inst_id, bar="4H", limit=60
+        )),
         20
     )
     candles_1w = require_list(
         "OKX weekly candles",
-        normalize_okx_candles(fetch_okx("market/candles", instId=inst_id, bar="1W", limit=30)),
+        normalize_okx_candles(fetch_okx(
+            "market/candles", request_timeout=request_timeout,
+            instId=inst_id, bar="1W", limit=30
+        )),
         1
     )
 
-    ticker_rows = require_list("OKX ticker", fetch_okx("market/ticker", instId=inst_id), 1)
+    ticker_rows = require_list(
+        "OKX ticker",
+        fetch_okx("market/ticker", request_timeout=request_timeout, instId=inst_id),
+        1
+    )
     ticker_row = require_dict_fields(
         "OKX ticker",
         ticker_rows[0],
@@ -223,7 +471,10 @@ def fetch_market_data_okx(symbol, fallback_reason=None):
         "volume": ticker_row["vol24h"]
     }
 
-    funding_rows = fetch_okx("public/funding-rate-history", instId=inst_id, limit=8)
+    funding_rows = fetch_okx(
+        "public/funding-rate-history", request_timeout=request_timeout,
+        instId=inst_id, limit=8
+    )
     funding_rows.sort(key=lambda row: int(row.get("fundingTime", "0")))
     funding = [
         {"fundingRate": row.get("fundingRate") or row.get("realizedRate") or "0"}
@@ -242,17 +493,338 @@ def fetch_market_data_okx(symbol, fallback_reason=None):
     }
 
 
+def fetch_market_data_bybit(symbol, fallback_reason=None, request_timeout=None):
+    """获取 Bybit USDT linear 行情，并统一成内部数据结构。"""
+    candles_1d_result = fetch_bybit(
+        "market/kline", request_timeout=request_timeout,
+        category="linear", symbol=symbol, interval="D", limit=90
+    )
+    candles_4h_result = fetch_bybit(
+        "market/kline", request_timeout=request_timeout,
+        category="linear", symbol=symbol, interval="240", limit=60
+    )
+    candles_1w_result = fetch_bybit(
+        "market/kline", request_timeout=request_timeout,
+        category="linear", symbol=symbol, interval="W", limit=30
+    )
+
+    candles_1d = require_list(
+        "Bybit daily candles",
+        normalize_bybit_candles(candles_1d_result.get("list", [])),
+        30
+    )
+    candles_4h = require_list(
+        "Bybit 4h candles",
+        normalize_bybit_candles(candles_4h_result.get("list", [])),
+        20
+    )
+    candles_1w = require_list(
+        "Bybit weekly candles",
+        normalize_bybit_candles(candles_1w_result.get("list", [])),
+        1
+    )
+
+    ticker_result = fetch_bybit(
+        "market/tickers", request_timeout=request_timeout,
+        category="linear", symbol=symbol
+    )
+    ticker_rows = require_list("Bybit ticker", ticker_result.get("list", []), 1)
+    ticker_row = require_dict_fields(
+        "Bybit ticker",
+        ticker_rows[0],
+        ["lastPrice", "price24hPcnt", "volume24h"]
+    )
+    change_pct = float(ticker_row["price24hPcnt"]) * 100
+    ticker = {
+        "lastPrice": ticker_row["lastPrice"],
+        "priceChangePercent": str(change_pct),
+        "volume": ticker_row["volume24h"]
+    }
+
+    funding_result = fetch_bybit(
+        "market/funding/history", request_timeout=request_timeout,
+        category="linear", symbol=symbol, limit=8
+    )
+    funding_rows = funding_result.get("list", [])
+    if not isinstance(funding_rows, list):
+        raise DataFetchError("Bybit funding response is malformed.")
+    funding_rows.sort(key=lambda row: int(row.get("fundingRateTimestamp", "0")))
+    funding = [{"fundingRate": row.get("fundingRate") or "0"} for row in funding_rows]
+
+    return {
+        "source": "bybit",
+        "instrument": symbol,
+        "klines_1d": candles_1d,
+        "klines_4h": candles_4h,
+        "klines_1w": candles_1w,
+        "ticker": ticker,
+        "funding": funding,
+        "fallback_reason": fallback_reason
+    }
+
+
+def fetch_market_data_mexc(symbol, fallback_reason=None, request_timeout=None):
+    """获取 MEXC USDT 永续行情，并统一成内部数据结构。"""
+    inst_id = mexc_symbol(symbol)
+    raw = fetch_tasks_parallel("MEXC", {
+        "daily candles": lambda: fetch_mexc(
+            f"contract/kline/{inst_id}", request_timeout=request_timeout,
+            interval="Day1", limit=90
+        ),
+        "4h candles": lambda: fetch_mexc(
+            f"contract/kline/{inst_id}", request_timeout=request_timeout,
+            interval="Hour4", limit=60
+        ),
+        "weekly candles": lambda: fetch_mexc(
+            f"contract/kline/{inst_id}", request_timeout=request_timeout,
+            interval="Week1", limit=30
+        ),
+        "ticker": lambda: fetch_mexc(
+            "contract/ticker", request_timeout=request_timeout, symbol=inst_id
+        ),
+        "funding": lambda: fetch_mexc(
+            "contract/funding_rate/history", request_timeout=request_timeout,
+            symbol=inst_id, page_num=1, page_size=8
+        ),
+    }, request_timeout=request_timeout)
+
+    candles_1d = require_list(
+        "MEXC daily candles",
+        normalize_mexc_candles(raw["daily candles"]),
+        30
+    )
+    candles_4h = require_list(
+        "MEXC 4h candles",
+        normalize_mexc_candles(raw["4h candles"]),
+        20
+    )
+    candles_1w = require_list(
+        "MEXC weekly candles",
+        normalize_mexc_candles(raw["weekly candles"]),
+        1
+    )
+
+    ticker = require_dict_fields(
+        "MEXC ticker",
+        raw["ticker"],
+        ["lastPrice", "riseFallRate", "volume24"]
+    )
+    unified_ticker = {
+        "lastPrice": str(ticker["lastPrice"]),
+        "priceChangePercent": str(float(ticker["riseFallRate"]) * 100),
+        "volume": str(ticker["volume24"])
+    }
+
+    funding_data = raw["funding"]
+    funding_rows = funding_data.get("resultList", []) if isinstance(funding_data, dict) else []
+    if not isinstance(funding_rows, list):
+        raise DataFetchError("MEXC funding response is malformed.")
+    funding_rows.sort(key=lambda row: int(row.get("settleTime", "0")))
+    funding = [{"fundingRate": str(row.get("fundingRate", "0"))} for row in funding_rows]
+
+    return {
+        "source": "mexc",
+        "instrument": inst_id,
+        "klines_1d": candles_1d,
+        "klines_4h": candles_4h,
+        "klines_1w": candles_1w,
+        "ticker": unified_ticker,
+        "funding": funding,
+        "fallback_reason": fallback_reason
+    }
+
+
+def fetch_market_data_bitget(symbol, fallback_reason=None, request_timeout=None):
+    """获取 Bitget USDT futures 行情，并统一成内部数据结构。"""
+    product_type = "usdt-futures"
+    raw = fetch_tasks_parallel("Bitget", {
+        "daily candles": lambda: fetch_bitget(
+            "mix/market/candles", request_timeout=request_timeout,
+            symbol=symbol, productType=product_type, granularity="1D", limit=90
+        ),
+        "4h candles": lambda: fetch_bitget(
+            "mix/market/candles", request_timeout=request_timeout,
+            symbol=symbol, productType=product_type, granularity="4H", limit=60
+        ),
+        "weekly candles": lambda: fetch_bitget(
+            "mix/market/candles", request_timeout=request_timeout,
+            symbol=symbol, productType=product_type, granularity="1W", limit=30
+        ),
+        "ticker": lambda: fetch_bitget(
+            "mix/market/ticker", request_timeout=request_timeout,
+            symbol=symbol, productType=product_type
+        ),
+        "funding": lambda: fetch_bitget(
+            "mix/market/history-fund-rate", request_timeout=request_timeout,
+            symbol=symbol, productType=product_type, pageSize=8
+        ),
+    }, request_timeout=request_timeout)
+
+    candles_1d = require_list(
+        "Bitget daily candles",
+        normalize_bitget_candles(raw["daily candles"]),
+        30
+    )
+    candles_4h = require_list(
+        "Bitget 4h candles",
+        normalize_bitget_candles(raw["4h candles"]),
+        20
+    )
+    candles_1w = require_list(
+        "Bitget weekly candles",
+        normalize_bitget_candles(raw["weekly candles"]),
+        1
+    )
+
+    ticker_rows = require_list(
+        "Bitget ticker",
+        raw["ticker"],
+        1
+    )
+    ticker_row = require_dict_fields(
+        "Bitget ticker",
+        ticker_rows[0],
+        ["lastPr", "change24h", "baseVolume"]
+    )
+    unified_ticker = {
+        "lastPrice": ticker_row["lastPr"],
+        "priceChangePercent": str(float(ticker_row["change24h"]) * 100),
+        "volume": ticker_row["baseVolume"]
+    }
+
+    funding_rows = raw["funding"]
+    if not isinstance(funding_rows, list):
+        raise DataFetchError("Bitget funding response is malformed.")
+    funding_rows.sort(key=lambda row: int(row.get("fundingTime", "0")))
+    funding = [{"fundingRate": row.get("fundingRate") or "0"} for row in funding_rows]
+
+    return {
+        "source": "bitget",
+        "instrument": symbol,
+        "klines_1d": candles_1d,
+        "klines_4h": candles_4h,
+        "klines_1w": candles_1w,
+        "ticker": unified_ticker,
+        "funding": funding,
+        "fallback_reason": fallback_reason
+    }
+
+
+MARKET_PROVIDER_FETCHERS = {
+    "mexc": fetch_market_data_mexc,
+    "bitget": fetch_market_data_bitget,
+    "binance": fetch_market_data_binance,
+    "okx": fetch_market_data_okx,
+    "bybit": fetch_market_data_bybit,
+}
+
+
+def enabled_market_providers():
+    raw_providers = os.environ.get("PAULWEI_MARKET_PROVIDERS")
+    if not raw_providers:
+        return list(DEFAULT_PROVIDERS)
+
+    providers = []
+    invalid = []
+    for item in raw_providers.split(","):
+        name = item.strip().lower()
+        if not name:
+            continue
+        if name not in MARKET_PROVIDER_FETCHERS:
+            invalid.append(name)
+            continue
+        if name not in providers:
+            providers.append(name)
+
+    if invalid:
+        raise DataFetchError(
+            "Invalid PAULWEI_MARKET_PROVIDERS entries: " + ", ".join(invalid)
+        )
+    if not providers:
+        raise DataFetchError("PAULWEI_MARKET_PROVIDERS did not contain any valid providers.")
+    return providers
+
+
+def route_reason(selected_provider, errors, pending):
+    parts = [f"Fastest routing selected {selected_provider}; this is not a sequential fallback."]
+    if errors:
+        failed = "; ".join(f"{name}: {message}" for name, message in sorted(errors.items()))
+        parts.append(f"Completed failures before selection: {failed}.")
+    if pending:
+        parts.append(f"Still pending when selected: {', '.join(pending)}.")
+    return " ".join(parts)
+
+
 def fetch_market_data(symbol):
-    """优先 Binance；受限或不可用时使用 OKX 公共 SWAP 行情。"""
-    try:
-        return fetch_market_data_binance(symbol)
-    except DataFetchError as binance_error:
+    """并发竞速多个合规公共行情源，返回最快的完整有效结果。"""
+    providers = enabled_market_providers()
+    result_queue = queue.Queue()
+    started_at = time.monotonic()
+    errors = {}
+
+    def worker(provider_name):
+        provider_started = time.monotonic()
         try:
-            return fetch_market_data_okx(symbol, fallback_reason=str(binance_error))
-        except DataFetchError as okx_error:
-            raise DataFetchError(
-                f"Binance failed: {binance_error}; OKX fallback failed: {okx_error}"
-            ) from okx_error
+            market = MARKET_PROVIDER_FETCHERS[provider_name](
+                symbol,
+                request_timeout=MARKET_REQUEST_TIMEOUT
+            )
+            elapsed_ms = round((time.monotonic() - provider_started) * 1000)
+            result_queue.put(("success", provider_name, market, elapsed_ms, None))
+        except Exception as exc:  # noqa: BLE001 - 路由层必须聚合所有源失败原因。
+            elapsed_ms = round((time.monotonic() - provider_started) * 1000)
+            result_queue.put(("error", provider_name, None, elapsed_ms, str(exc)))
+
+    for provider_name in providers:
+        thread = threading.Thread(target=worker, args=(provider_name,), daemon=True)
+        thread.start()
+
+    remaining = len(providers)
+    deadline = started_at + MARKET_ROUTE_TIMEOUT
+    while remaining > 0 and time.monotonic() < deadline:
+        wait_seconds = max(0.05, min(0.25, deadline - time.monotonic()))
+        try:
+            status, provider_name, market, elapsed_ms, message = result_queue.get(
+                timeout=wait_seconds
+            )
+        except queue.Empty:
+            continue
+
+        remaining -= 1
+        if status == "success":
+            pending = [
+                name for name in providers
+                if name != provider_name and name not in errors
+            ]
+            if provider_name != "binance" or errors or pending:
+                market["fallback_reason"] = route_reason(provider_name, errors, pending)
+            market["routing"] = {
+                "strategy": "fastest_first_success",
+                "providers": providers,
+                "selected": provider_name,
+                "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+                "provider_elapsed_ms": elapsed_ms,
+                "request_timeout_sec": MARKET_REQUEST_TIMEOUT,
+                "route_timeout_sec": MARKET_ROUTE_TIMEOUT,
+                "proxy_mode": MARKET_PROXY_MODE,
+                "http_client": MARKET_HTTP_CLIENT,
+                "failed_providers": errors,
+                "pending_providers": pending
+            }
+            return market
+
+        errors[provider_name] = message
+
+    pending = [name for name in providers if name not in errors]
+    failures = "; ".join(f"{name}: {message}" for name, message in sorted(errors.items()))
+    if pending:
+        failures = f"{failures}; pending/timed out: {', '.join(pending)}" if failures else (
+            f"pending/timed out: {', '.join(pending)}"
+        )
+    raise DataFetchError(
+        "All market data routes failed or timed out within "
+        f"{MARKET_ROUTE_TIMEOUT}s. {failures}"
+    )
 
 
 def require_list(name, data, min_len=1):
@@ -268,6 +840,31 @@ def require_dict_fields(name, data, fields):
     if missing:
         raise DataFetchError(f"{name} response is missing fields: {', '.join(missing)}")
     return data
+
+
+def fetch_tasks_parallel(provider, tasks, request_timeout=None):
+    """并发获取同一 provider 的多个接口，减少完整指标等待时间。"""
+    if not tasks:
+        return {}
+
+    timeout = (request_timeout or MARKET_REQUEST_TIMEOUT) + 1.0
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {executor.submit(task): name for name, task in tasks.items()}
+        try:
+            for future in as_completed(futures, timeout=timeout):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as exc:  # noqa: BLE001 - 需要保留接口名以便定位。
+                    raise DataFetchError(f"{provider} {name} request failed: {exc}") from exc
+        except FuturesTimeoutError as exc:
+            pending = [name for future, name in futures.items() if not future.done()]
+            raise DataFetchError(
+                f"{provider} parallel requests timed out: {', '.join(pending)}"
+            ) from exc
+
+    return results
 
 
 def ma(closes, n):
@@ -575,7 +1172,8 @@ def main():
         "data_source": {
             "provider": market["source"],
             "instrument": market["instrument"],
-            "fallback_reason": market["fallback_reason"]
+            "fallback_reason": market["fallback_reason"],
+            "routing": market.get("routing")
         },
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "price": {
