@@ -124,6 +124,42 @@ h2 {
   gap: 10px;
 }
 
+.auto-run {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(118, 168, 255, 0.08);
+}
+
+.auto-run > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.auto-run span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.auto-controls {
+  display: grid;
+  grid-template-columns: 120px minmax(150px, auto) minmax(86px, auto);
+  gap: 10px;
+  align-items: end;
+}
+
+.inline-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 button,
 input,
 select {
@@ -218,6 +254,68 @@ select {
 .metric strong {
   font-size: 22px;
   overflow-wrap: anywhere;
+}
+
+.performance-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
+.mini-metric {
+  display: grid;
+  gap: 7px;
+  padding: 14px 16px;
+  background: var(--panel);
+}
+
+.mini-metric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mini-metric strong {
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border-top: 1px solid var(--line);
+}
+
+.history-grid > div {
+  min-width: 0;
+  background: var(--panel);
+}
+
+.history-grid h3 {
+  margin: 0;
+  padding: 14px 16px 0;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.history-list {
+  display: grid;
+}
+
+.history-line {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.history-line span,
+.history-line small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .section-head {
@@ -325,8 +423,15 @@ select {
 @media (max-width: 860px) {
   .actions,
   .summary-grid,
-  .settings {
+  .performance-grid,
+  .settings,
+  .auto-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .auto-run {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
@@ -338,7 +443,10 @@ select {
 
   .actions,
   .summary-grid,
+  .performance-grid,
+  .history-grid,
   .settings,
+  .auto-controls,
   .order-line {
     grid-template-columns: 1fr;
   }

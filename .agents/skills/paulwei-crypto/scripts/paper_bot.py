@@ -176,6 +176,7 @@ def initial_state(balance):
         "closed_trades": [],
         "risk_events": [],
         "funding_snapshots": [],
+        "equity_snapshots": [],
         "last_tick_at": None,
         "last_candle_time": None,
         "last_processed_candle_time": None,
@@ -192,6 +193,7 @@ def migrate_state(state):
     state.setdefault("closed_trades", [])
     state.setdefault("risk_events", [])
     state.setdefault("funding_snapshots", [])
+    state.setdefault("equity_snapshots", [])
     state.setdefault("last_tick_at", None)
     state.setdefault("last_candle_time", None)
     state.setdefault("last_processed_candle_time", None)
@@ -975,6 +977,58 @@ def update_equity_snapshot(state, mark_price):
     return round(unrealized, 8)
 
 
+def record_equity_snapshot(state, mark_price, unrealized, source):
+    snapshot = {
+        "created_at": utc_now(),
+        "source": source,
+        "equity": state.get("equity"),
+        "cash_balance": state.get("cash_balance"),
+        "unrealized_pnl": round(float(unrealized), 8),
+        "mark_price": round(float(mark_price), 4),
+        "open_position_contracts": sum(
+            int(position.get("remaining_contracts", 0))
+            for position in state.get("positions", [])
+            if int(position.get("remaining_contracts", 0)) > 0
+        )
+    }
+    snapshots = state.setdefault("equity_snapshots", [])
+    snapshots.append(snapshot)
+    if len(snapshots) > 500:
+        del snapshots[:-500]
+    return snapshot
+
+
+def performance_summary(state, unrealized=0.0):
+    trades = state.get("closed_trades", [])
+    realized_values = [float(trade.get("realized_pnl", 0)) for trade in trades]
+    total_realized = round(sum(realized_values), 8)
+    gross_profit = round(sum(value for value in realized_values if value > 0), 8)
+    gross_loss = round(abs(sum(value for value in realized_values if value < 0)), 8)
+    wins = sum(1 for value in realized_values if value > 0)
+    losses = sum(1 for value in realized_values if value < 0)
+    trade_count = len(trades)
+    win_rate_pct = round(wins / trade_count * 100, 2) if trade_count else 0.0
+    profit_factor = round(gross_profit / gross_loss, 4) if gross_loss > 0 else None
+    equity = float(state.get("equity", state.get("cash_balance", 0)))
+    peak_equity = float(state.get("peak_equity", equity))
+    current_drawdown_pct = round((peak_equity - equity) / peak_equity * 100, 4) if peak_equity > 0 else 0.0
+    return {
+        "trade_count": trade_count,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate_pct,
+        "gross_profit_usdt": gross_profit,
+        "gross_loss_usdt": gross_loss,
+        "profit_factor": profit_factor,
+        "realized_pnl_usdt": total_realized,
+        "unrealized_pnl_usdt": round(float(unrealized), 8),
+        "net_pnl_usdt": round(total_realized + float(unrealized), 8),
+        "current_drawdown_pct": current_drawdown_pct,
+        "max_drawdown_pct": state.get("max_drawdown_pct", 0),
+        "equity_snapshots_count": len(state.get("equity_snapshots", [])),
+    }
+
+
 def command_tick(args):
     path = state_path_from_args(args)
     state = load_state(path)
@@ -1002,13 +1056,16 @@ def command_tick(args):
 
     unrealized = update_equity_snapshot(state, mark_price)
     last_market_timestamp = state.get("last_market_timestamp")
-    if tick_status == "processed" or ticker.get("timestamp") != last_market_timestamp:
+    should_record_market_snapshot = tick_status == "processed" or ticker.get("timestamp") != last_market_timestamp
+    equity_snapshot = None
+    if should_record_market_snapshot:
         state.setdefault("funding_snapshots", []).append({
             "created_at": utc_now(),
             "symbol": SUPPORTED_SYMBOL,
             "funding_rate": ticker.get("funding_rate", 0),
             "mark_price": mark_price
         })
+        equity_snapshot = record_equity_snapshot(state, mark_price, unrealized, tick_status)
     locked, daily_pnl, lock_amount = is_risk_locked(state)
     if locked:
         append_daily_loss_lock_event(state, daily_pnl, lock_amount)
@@ -1028,6 +1085,7 @@ def command_tick(args):
         "filled_orders": filled_orders,
         "exit_events": exit_events,
         "unrealized_pnl": unrealized,
+        "equity_snapshot": equity_snapshot,
         "equity": state["equity"],
         "risk_locked": locked
     }
@@ -1067,6 +1125,7 @@ def status_payload(state, market=None, market_error=None, expired_items=None):
         "unrealized_pnl": unrealized,
         "daily_realized_pnl": daily_realized_pnl(state),
         "max_drawdown_pct": state.get("max_drawdown_pct", 0),
+        "performance": performance_summary(state, unrealized),
         "risk_locked": is_risk_locked(state)[0],
         "position": active_pos,
         "open_orders": decorate_orders_with_market(open_orders, mark_price),
@@ -1075,6 +1134,8 @@ def status_payload(state, market=None, market_error=None, expired_items=None):
             if plan.get("status") == "pending"
         ],
         "closed_trades_count": len(state.get("closed_trades", [])),
+        "closed_trades": state.get("closed_trades", [])[-20:],
+        "equity_snapshots": state.get("equity_snapshots", [])[-100:],
         "risk_events": state.get("risk_events", [])[-5:],
         "expired_items": expired_items or [],
         "last_tick_at": state.get("last_tick_at"),

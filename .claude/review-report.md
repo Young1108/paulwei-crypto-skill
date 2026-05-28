@@ -109,3 +109,64 @@
 ## 建议
 
 通过当前 v1 完善项。下一阶段应优先补历史页面、权益曲线、定时 tick 与失败告警，不应接入真实账户或密钥。
+
+---
+
+# BTC Paper 自动运行层审查
+
+- 生成时间：2026-05-29 01:37（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`web/`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，继续保持 paper-only
+- 综合评分：88/100
+
+## 已完成
+
+1. 新增本地 `AutoTickController`，支持在 paper server 进程内自动调用 `tick`。
+2. 新增 `/api/auto/start`、`/api/auto/stop`、`/api/auto/status`。
+3. `/api/status` 与 `/api/health` 返回自动运行状态，便于前端和外部工具观测。
+4. 前端新增自动运行面板、间隔输入、启动和停止控制。
+5. 自动 tick 失败时只记录错误，不使用旧行情模拟交易。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：15 个测试通过。
+- 临时服务 `http://127.0.0.1:8788`：auto API 启停验证通过。
+- 浏览器验证：自动运行面板、启动自动 tick、停止按钮可见。
+
+## 剩余风险
+
+- 自动运行依赖本地 server 生命周期，不是独立守护进程。
+- 当前只做 tick 自动推进，不自动生成新计划；这是刻意保守边界。
+- 无权益曲线、历史订单页和策略回测，仍不足以评估长期策略质量。
+
+---
+
+# BTC Paper 绩效与历史审计层审查
+
+- 生成时间：2026-05-29 01:50（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，仍保持 paper-only
+- 综合评分：90/100
+
+## 已完成
+
+1. 新增 `equity_snapshots`，有效 tick 会记录权益快照。
+2. 新增 `performance_summary()`，输出交易次数、胜率、利润因子、已实现/未实现/净盈亏、当前回撤。
+3. `status` 返回最近权益快照、最近已平仓交易和绩效统计。
+4. 前端新增“绩效 / 历史”面板，展示核心绩效和最近历史。
+5. 测试覆盖绩效统计与 tick 快照输出。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：16 个测试通过。
+- 临时服务 `/api/status` 返回 `performance`、`closed_trades`、`equity_snapshots`。
+- 浏览器验证“绩效 / 历史”面板可见。
+
+## 剩余风险
+
+- 尚未实现权益折线图、历史筛选、交易导出和回测对比。
+- 绩效指标基于 paper 成交账本，不能代表真实成交滑点或真实账户结果。

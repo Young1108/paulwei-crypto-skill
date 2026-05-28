@@ -11,6 +11,10 @@ const els = {
   placeBtn: document.querySelector("#placeBtn"),
   tickBtn: document.querySelector("#tickBtn"),
   cancelBtn: document.querySelector("#cancelBtn"),
+  autoStartBtn: document.querySelector("#autoStartBtn"),
+  autoStopBtn: document.querySelector("#autoStopBtn"),
+  autoIntervalInput: document.querySelector("#autoIntervalInput"),
+  autoStatusText: document.querySelector("#autoStatusText"),
   refreshBtn: document.querySelector("#refreshBtn"),
   clearLogBtn: document.querySelector("#clearLogBtn"),
   marketPriceValue: document.querySelector("#marketPriceValue"),
@@ -20,9 +24,18 @@ const els = {
   drawdownValue: document.querySelector("#drawdownValue"),
   riskValue: document.querySelector("#riskValue"),
   planBadge: document.querySelector("#planBadge"),
+  tradeCountBadge: document.querySelector("#tradeCountBadge"),
+  netPnlValue: document.querySelector("#netPnlValue"),
+  realizedPnlValue: document.querySelector("#realizedPnlValue"),
+  unrealizedPnlValue: document.querySelector("#unrealizedPnlValue"),
+  winRateValue: document.querySelector("#winRateValue"),
+  profitFactorValue: document.querySelector("#profitFactorValue"),
+  currentDrawdownValue: document.querySelector("#currentDrawdownValue"),
   plansView: document.querySelector("#plansView"),
   positionsView: document.querySelector("#positionsView"),
   ordersView: document.querySelector("#ordersView"),
+  tradesView: document.querySelector("#tradesView"),
+  equitySnapshotsView: document.querySelector("#equitySnapshotsView"),
   logView: document.querySelector("#logView"),
 };
 
@@ -59,7 +72,16 @@ async function api(path, body = null) {
 }
 
 function setBusy(busy) {
-  [els.initBtn, els.proposeBtn, els.placeBtn, els.tickBtn, els.cancelBtn, els.refreshBtn].forEach((button) => {
+  [
+    els.initBtn,
+    els.proposeBtn,
+    els.placeBtn,
+    els.tickBtn,
+    els.cancelBtn,
+    els.autoStartBtn,
+    els.autoStopBtn,
+    els.refreshBtn,
+  ].forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -68,6 +90,13 @@ function fmtTime(value) {
   if (!value) return "--";
   if (typeof value === "number") return new Date(value).toLocaleTimeString();
   return String(value).replace("T", " ").replace("Z", " UTC");
+}
+
+function pnlClass(value) {
+  const number = Number(value);
+  if (number > 0) return "positive";
+  if (number < 0) return "negative";
+  return "";
 }
 
 function renderDataLine(status) {
@@ -90,7 +119,20 @@ function renderDataLine(status) {
     initialized: "已初始化",
   };
   const actionText = actionMap[status.last_action] || status.last_action || "无";
-  els.dataStatusText.textContent = `行情状态：${marketText}，延迟 ${age}；上次 Tick：${tickText}；账本动作：${actionText}`;
+  const auto = status.auto_tick || {};
+  const autoText = auto.running ? `自动运行中，每 ${fmt(auto.interval_seconds, 0)} 秒` : "自动未启动";
+  els.dataStatusText.textContent = `行情状态：${marketText}，延迟 ${age}；上次 Tick：${tickText}；账本动作：${actionText}；${autoText}`;
+}
+
+function renderAutoStatus(autoTick) {
+  const auto = autoTick || {};
+  const runningText = auto.running ? "运行中" : "已停止";
+  const intervalText = Number.isFinite(Number(auto.interval_seconds))
+    ? `${fmt(auto.interval_seconds, 0)} 秒`
+    : "--";
+  const lastTickText = auto.last_tick_at ? fmtTime(auto.last_tick_at) : "尚未执行";
+  const errorText = auto.last_error ? `；最近错误：${auto.last_error}` : "";
+  els.autoStatusText.textContent = `${runningText} · 间隔 ${intervalText} · 成功 ${auto.tick_count || 0} 次 · 错误 ${auto.error_count || 0} 次 · 上次 ${lastTickText}${errorText}`;
 }
 
 function setNextStep(status) {
@@ -135,6 +177,7 @@ function renderStatus(status) {
   els.riskValue.textContent = status.risk_locked ? "锁定" : "正常";
   els.riskValue.className = status.risk_locked ? "warning" : "positive";
   renderDataLine(status);
+  renderAutoStatus(status.auto_tick);
   setNextStep(status);
 
   const plans = status.pending_plans || [];
@@ -145,6 +188,9 @@ function renderStatus(status) {
   els.positionsView.className = status.position ? "" : "empty";
   els.positionsView.innerHTML = status.position ? renderPosition(status.position) : "暂无持仓";
   els.ordersView.innerHTML = (status.open_orders || []).map(renderOrder).join("");
+  renderPerformance(status.performance || {});
+  renderTrades(status.closed_trades || []);
+  renderEquitySnapshots(status.equity_snapshots || []);
 }
 
 function renderSimplePlan(plan) {
@@ -199,6 +245,48 @@ function renderOrder(order) {
   `;
 }
 
+function renderPerformance(performance) {
+  els.tradeCountBadge.textContent = String(performance.trade_count || 0);
+  els.netPnlValue.textContent = `${fmt(performance.net_pnl_usdt, 4)} U`;
+  els.netPnlValue.className = pnlClass(performance.net_pnl_usdt);
+  els.realizedPnlValue.textContent = `${fmt(performance.realized_pnl_usdt, 4)} U`;
+  els.realizedPnlValue.className = pnlClass(performance.realized_pnl_usdt);
+  els.unrealizedPnlValue.textContent = `${fmt(performance.unrealized_pnl_usdt, 4)} U`;
+  els.unrealizedPnlValue.className = pnlClass(performance.unrealized_pnl_usdt);
+  els.winRateValue.textContent = `${fmt(performance.win_rate_pct, 2)}%`;
+  els.profitFactorValue.textContent = performance.profit_factor === null || performance.profit_factor === undefined
+    ? "--"
+    : fmt(performance.profit_factor, 2);
+  els.currentDrawdownValue.textContent = `${fmt(performance.current_drawdown_pct, 2)}%`;
+  els.currentDrawdownValue.className = Number(performance.current_drawdown_pct) > 0 ? "warning" : "";
+}
+
+function renderTrades(trades) {
+  els.tradesView.className = trades.length ? "history-list" : "empty";
+  els.tradesView.innerHTML = trades.length
+    ? trades.slice().reverse().map((trade) => `
+        <article class="history-line">
+          <strong class="${pnlClass(trade.realized_pnl)}">${fmt(trade.realized_pnl, 4)} U</strong>
+          <span>${trade.reason || "--"} · ${trade.contracts} 张 · ${fmt(trade.exit_price, 1)}</span>
+          <small>${fmtTime(trade.closed_at)}</small>
+        </article>
+      `).join("")
+    : "暂无已平仓交易";
+}
+
+function renderEquitySnapshots(snapshots) {
+  els.equitySnapshotsView.className = snapshots.length ? "history-list" : "empty";
+  els.equitySnapshotsView.innerHTML = snapshots.length
+    ? snapshots.slice(-10).reverse().map((snapshot) => `
+        <article class="history-line">
+          <strong>${fmt(snapshot.equity, 4)} U</strong>
+          <span>${snapshot.source || "tick"} · 标记价 ${fmt(snapshot.mark_price, 1)} · 未实现 ${fmt(snapshot.unrealized_pnl, 4)} U</span>
+          <small>${fmtTime(snapshot.created_at)}</small>
+        </article>
+      `).join("")
+    : "暂无 tick 快照";
+}
+
 async function refreshStatus(label = "状态") {
   const status = await api("/api/status");
   renderStatus(status);
@@ -251,6 +339,20 @@ els.cancelBtn.addEventListener("click", async () => {
   const payload = await api("/api/cancel", { all: true });
   log("取消", payload);
   await refreshStatus("取消后状态");
+});
+
+els.autoStartBtn.addEventListener("click", async () => {
+  const payload = await api("/api/auto/start", {
+    interval_seconds: Number(els.autoIntervalInput.value || 60),
+  });
+  log("启动自动运行", payload);
+  await refreshStatus("自动运行状态");
+});
+
+els.autoStopBtn.addEventListener("click", async () => {
+  const payload = await api("/api/auto/stop", {});
+  log("停止自动运行", payload);
+  await refreshStatus("自动运行状态");
 });
 
 els.refreshBtn.addEventListener("click", () => refreshStatus());

@@ -133,6 +133,21 @@ class PaperBotUnitTest(unittest.TestCase):
         self.assertEqual(expired[0]["type"], "order")
         self.assertEqual(state["open_orders"][0]["status"], "expired")
 
+    def test_performance_summary_tracks_win_rate_and_profit_factor(self):
+        state = paper_bot.initial_state(500)
+        state["closed_trades"].extend([
+            {"realized_pnl": 3.0, "closed_at": paper_bot.utc_now()},
+            {"realized_pnl": -1.0, "closed_at": paper_bot.utc_now()},
+            {"realized_pnl": 2.0, "closed_at": paper_bot.utc_now()},
+        ])
+        summary = paper_bot.performance_summary(state, unrealized=0.5)
+        self.assertEqual(summary["trade_count"], 3)
+        self.assertEqual(summary["wins"], 2)
+        self.assertEqual(summary["losses"], 1)
+        self.assertEqual(summary["win_rate_pct"], 66.67)
+        self.assertEqual(summary["profit_factor"], 5.0)
+        self.assertEqual(summary["net_pnl_usdt"], 4.5)
+
 
 class PaperBotCliTest(unittest.TestCase):
     def test_init_propose_place_tick_status_flow_with_fixtures(self):
@@ -174,8 +189,11 @@ class PaperBotCliTest(unittest.TestCase):
             self.assertTrue(placed["ok"])
             tick = self.run_cli(["tick", "--state-path", str(state_path)], env)
             self.assertTrue(tick["ok"])
+            self.assertIn("equity_snapshot", tick)
             status = self.run_cli(["status", "--no-market", "--state-path", str(state_path)], env)
             self.assertTrue(status["ok"])
+            self.assertIn("performance", status)
+            self.assertGreaterEqual(len(status["equity_snapshots"]), 1)
 
     def test_tick_skips_duplicate_candle_without_closing_position(self):
         with tempfile.TemporaryDirectory() as tmpdir:

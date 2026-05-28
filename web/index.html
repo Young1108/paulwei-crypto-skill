@@ -37,6 +37,21 @@
           <button id="cancelBtn" class="danger">取消草案/挂单</button>
         </div>
 
+        <div class="auto-run">
+          <div>
+            <strong>自动运行</strong>
+            <span id="autoStatusText">未启动</span>
+          </div>
+          <div class="auto-controls">
+            <label class="inline-field">
+              <span>间隔</span>
+              <input id="autoIntervalInput" type="number" value="60" min="5" max="3600" step="5">
+            </label>
+            <button id="autoStartBtn">启动自动 tick</button>
+            <button id="autoStopBtn" class="ghost">停止</button>
+          </div>
+        </div>
+
         <details class="advanced">
           <summary>高级设置</summary>
           <div class="settings">
@@ -106,6 +121,49 @@
         </div>
         <div id="positionsView" class="empty">暂无持仓</div>
         <div id="ordersView"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>绩效 / 历史</h2>
+          <span id="tradeCountBadge">0</span>
+        </div>
+        <div class="performance-grid">
+          <article class="mini-metric">
+            <span>累计净盈亏</span>
+            <strong id="netPnlValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>已实现</span>
+            <strong id="realizedPnlValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>未实现</span>
+            <strong id="unrealizedPnlValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>胜率</span>
+            <strong id="winRateValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>利润因子</span>
+            <strong id="profitFactorValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>当前回撤</span>
+            <strong id="currentDrawdownValue">--</strong>
+          </article>
+        </div>
+        <div class="history-grid">
+          <div>
+            <h3>最近交易</h3>
+            <div id="tradesView" class="empty">暂无已平仓交易</div>
+          </div>
+          <div>
+            <h3>权益快照</h3>
+            <div id="equitySnapshotsView" class="empty">暂无 tick 快照</div>
+          </div>
+        </div>
       </section>
 
       <details class="panel log-panel">
