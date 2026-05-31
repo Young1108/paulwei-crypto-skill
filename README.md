@@ -106,7 +106,10 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 ```bash
 python3 scripts/paper_bot.py init --balance 500
 python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
+python3 scripts/paper_bot.py scan --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
+python3 scripts/paper_bot.py pause --reason manual_review
+python3 scripts/paper_bot.py resume --reason manual_review_done
 python3 scripts/paper_bot.py cancel --all
 python3 scripts/paper_bot.py tick
 python3 scripts/paper_bot.py status
@@ -119,27 +122,40 @@ python3 scripts/paper_server.py --host 127.0.0.1 --port 8787
 
 然后打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。
 
+需要隔离演练账本时可以指定独立路径：
+```bash
+python3 scripts/paper_server.py --host 127.0.0.1 --port 8787 --state-path /private/tmp/btc-paper-demo.json
+```
+
 界面按最小流程使用：
-1. 需要重开模拟时点“重置 500U 模拟账户”。
-2. 点“生成做空草案”，系统会判断是否值得模拟。
+1. 需要重开模拟时点“重置 500U 模拟账户”；若旧账本存在，系统会先备份到 `backups/`。
+2. 点“生成做空草案”，系统会判断是否值得模拟；也可以点“扫描一次”，先推进 tick 再尝试生成草案。
 3. 有草案且你接受风险时，点“确认为模拟挂单”。
 4. 不想继续等待时，点“取消草案/挂单”。
-5. 之后可以手动点“刷新行情并模拟成交”，也可以启动“自动 tick”，让本地服务按间隔推进模拟账本。
+5. 需要人工熔断时点“暂停新草案”，恢复后再继续生成新计划。
+6. 之后可以手动点“刷新行情并模拟成交”，也可以启动自动运行；自动运行支持 `Tick` 或 `Scan`，`Scan` 只生成待确认草案。
 
-前端会显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、绩效统计和最近交易历史，并每 15 秒自动刷新状态。若挂单距现价较远，模拟成交不会发生，这是策略等待反弹触发，不是行情失效。
+前端会显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、最近风控事件、绩效统计、权益曲线和最近交易历史，并每 15 秒自动刷新状态。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单距现价较远，模拟成交不会发生，这是策略等待反弹触发，不是行情失效。
 
 **v1 限制**：
 - 只支持 `BTCUSDT` / MEXC `BTC_USDT`
 - 只支持 paper 模拟，不支持真实下单或 CEX API 签名
+- `init` 重置已有账本前会自动备份旧 paper JSON，并默认只保留最近 20 个备份
 - 单笔标准风险 `0.5%`，单笔最大风险 `1%`
 - 最大模拟杠杆 `3x`
 - 日内累计亏损达到 `2%` 后停止生成新计划
+- 手动 `pause` 只阻止新草案生成，不会取消已有模拟挂单或干预持仓退出
+- `scan` 只执行 `tick -> propose`，不会确认挂单或真实下单
+- `status` 返回 `risk_summary`，包含单笔风险、日亏损余量、日亏损上限和控制状态
 - `tick` 对同一根 1 分钟 K 线幂等：重复点击只刷新权益，不重复成交或止盈止损
 - 新挂单不会用创建所在 K 线的历史 high/low 乐观成交
 - 草案和开放入场挂单过期后会自动失效
 - 自动 tick 只在本地 paper server 进程内运行；服务关闭后自动停止
+- 自动运行 `scan` 模式只执行 `tick -> propose`，不会自动确认挂单
 - 自动 tick 行情失败时只记录错误，不使用旧数据模拟交易
 - 每次有效 tick 记录权益快照，`status` 返回最近权益快照、最近已平仓交易和绩效统计
+- `/api/export/state` 只导出本地 paper 账本 JSON，不包含真实账户凭据
+- `paper_server.py --state-path` 可隔离本地账本，自动 tick 和全部 API 使用同一路径
 
 ---
 

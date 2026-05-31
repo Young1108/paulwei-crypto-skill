@@ -120,7 +120,7 @@ h2 {
 
 .actions {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -135,20 +135,52 @@ h2 {
   background: rgba(118, 168, 255, 0.08);
 }
 
+.manual-guard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.06);
+}
+
 .auto-run > div:first-child {
   display: grid;
   gap: 4px;
 }
 
-.auto-run span {
+.manual-guard > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.auto-run span,
+.manual-guard span {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
 }
 
+.manual-guard span.positive {
+  color: var(--green);
+}
+
+.manual-guard span.warning {
+  color: var(--amber);
+}
+
+.guard-controls {
+  display: grid;
+  grid-template-columns: minmax(130px, auto) minmax(86px, auto);
+  gap: 10px;
+  align-items: end;
+}
+
 .auto-controls {
   display: grid;
-  grid-template-columns: 120px minmax(150px, auto) minmax(86px, auto);
+  grid-template-columns: 110px 120px minmax(150px, auto) minmax(86px, auto);
   gap: 10px;
   align-items: end;
 }
@@ -263,6 +295,13 @@ select {
   background: var(--line);
 }
 
+.risk-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+}
+
 .mini-metric {
   display: grid;
   gap: 7px;
@@ -329,6 +368,48 @@ select {
 
 .section-head h2 {
   font-size: 16px;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.equity-chart {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chart-head h3 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.chart-head span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.equity-chart canvas {
+  width: 100%;
+  height: 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
 }
 
 .empty,
@@ -424,11 +505,14 @@ select {
   .actions,
   .summary-grid,
   .performance-grid,
+  .risk-grid,
   .settings,
+  .guard-controls,
   .auto-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .manual-guard,
   .auto-run {
     align-items: stretch;
     flex-direction: column;
@@ -444,11 +528,22 @@ select {
   .actions,
   .summary-grid,
   .performance-grid,
+  .risk-grid,
   .history-grid,
   .settings,
+  .guard-controls,
   .auto-controls,
   .order-line {
     grid-template-columns: 1fr;
+  }
+
+  .chart-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .chart-head span {
+    text-align: left;
   }
 
   .simple-list p {

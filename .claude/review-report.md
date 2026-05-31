@@ -170,3 +170,243 @@
 
 - 尚未实现权益折线图、历史筛选、交易导出和回测对比。
 - 绩效指标基于 paper 成交账本，不能代表真实成交滑点或真实账户结果。
+
+---
+
+# BTC Paper 导出与权益曲线审查
+
+- 生成时间：2026-05-29 10:32（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`web/`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，继续保持 paper-only
+- 综合评分：91/100
+
+## 已完成
+
+1. 新增 `GET /api/export/state`，返回 `paper_only=true` 和完整本地 paper 账本。
+2. 导出 payload 由 `export_state_payload()` 生成，测试可直接覆盖，不依赖真实 HTTP 服务。
+3. 前端新增“导出账本”按钮，可下载 JSON 文件用于复盘。
+4. 前端新增权益曲线 canvas，用最近权益快照显示权益变化。
+5. 测试覆盖导出 payload，并检查不包含 `api_key`、`private_key`、`mnemonic` 等真实账户敏感字段。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：18 个测试通过。
+- 临时服务 `/api/health`、`POST /api/init`、`GET /api/export/state` 均返回合法 JSON。
+- 前端静态资源包含“导出账本”、`equityCurveCanvas` 和 `renderEquityCurve()`。
+- Headless Playwright 打开本地页面，确认导出按钮、权益曲线 canvas、paper-only 提示和“绩效 / 历史”可见。
+
+## 剩余风险
+
+- 权益曲线只使用当前 `status` 返回的最近 100 条快照，不是长期报表。
+- 导出是完整本地 paper 账本，没有筛选和脱敏配置；当前账本设计不保存真实凭据，因此可接受。
+- 仍未实现回测、多头策略、多币种 paper 和独立守护进程。
+
+---
+
+# BTC Paper 手动熔断控制审查
+
+- 生成时间：2026-05-29 10:49（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，适合作为 paper 机器人控制面基础能力
+- 综合评分：92/100
+
+## 已完成
+
+1. 新增 `pause` / `resume` CLI 命令，支持人工暂停和恢复新草案生成。
+2. `propose` 在 `trading_paused=true` 时直接返回 `status=paused`，不触发行情分析或计划生成。
+3. `tick` 不受暂停影响，仍可推进已有模拟挂单、止盈止损和权益更新。
+4. server 新增 `/api/pause`、`/api/resume`，前端新增“暂停新草案 / 恢复”控制。
+5. 暂停/恢复事件写入 `risk_events`，导出账本时可审计。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：20 个测试通过。
+- 单测覆盖暂停后阻止 `propose`，恢复后 `status.trading_paused=false`。
+- 临时服务 `/api/pause` 和 `/api/resume` 返回预期 JSON。
+- Headless Playwright 验证暂停按钮、恢复按钮、导出按钮和权益曲线 canvas 可见。
+
+## 剩余风险
+
+- 当前是一键暂停新草案，不是完整守护进程熔断；不会停止正在运行的 server 进程。
+- 前端暂未提供 `risk_events` 单独过滤视图。
+
+---
+
+# BTC Paper 独立账本路径审查
+
+- 生成时间：2026-05-29 11:00（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，减少本地验证和多实例运行的账本污染风险
+- 综合评分：92/100
+
+## 已完成
+
+1. `paper_server.py` 新增 `--state-path`，支持为本地 server 指定独立 paper 账本。
+2. 所有 HTTP API 使用同一个 server 级 `paper_state_path`，包括 init、propose、place、pause、resume、cancel、tick、status。
+3. `/api/export/state` 使用同一隔离账本路径导出。
+4. 自动 tick 通过 `AutoTickController.state_path` 调用同一隔离账本。
+5. 文档补充隔离演练账本启动命令。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：21 个测试通过。
+- 单测覆盖自动 tick 传递配置的 `state_path`。
+- 临时服务以 `--state-path /private/tmp/paulwei-paper-state-path-1100.json` 启动，API 使用隔离账本。
+- 默认 `data/paper_state.json` 验证前后 mtime 均为 `1780023164`，未被本轮运行级验证改动。
+- Headless Playwright 确认隔离账本服务页面关键控件可见。
+
+## 剩余风险
+
+- 当前账本路径是 server 启动参数，前端不能动态切换账本。
+- 尚未实现多账本对比、归档和回测复用。
+
+---
+
+# BTC Paper 风险摘要与事件面板审查
+
+- 生成时间：2026-05-29 11:11（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，提升 paper 机器人风险可观测性
+- 综合评分：93/100
+
+## 已完成
+
+1. 新增 `risk_summary()`，集中输出单笔风险、日亏损上限、日亏损余量、杠杆上限和控制状态。
+2. `status` 返回 `risk_summary`，便于 CLI、Web UI 和外部工具统一读取。
+3. 前端新增“风险 / 事件”面板，展示核心风险参数和最近 `risk_events`。
+4. 测试覆盖 500U 账户的标准风险、最大风险、日亏损上限和剩余额度计算。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：22 个测试通过。
+- 隔离账本临时服务 `/api/status` 返回预期 `risk_summary`。
+- Headless Playwright 确认“风险 / 事件”面板和核心风险指标可见。
+
+## 剩余风险
+
+- 风险事件面板仍是最近事件展示，未做筛选、搜索或分页。
+- paper 风险摘要不等价于真实交易所保证金、维持保证金或强平风险。
+
+---
+
+# BTC Paper Scan 周期审查
+
+- 生成时间：2026-05-30 23:14（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，符合 paper-only 半自动机器人边界
+- 综合评分：93/100
+
+## 已完成
+
+1. 新增 `scan` CLI 命令，执行 `tick -> propose`。
+2. `scan` 不会确认挂单，不会真实下单，只可能生成待确认草案。
+3. server 新增 `/api/scan`。
+4. 前端新增“扫描一次”按钮。
+5. 测试覆盖 fixture 行情下 `scan` 先 tick 后生成 `placeable` 草案。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：23 个测试通过。
+- 隔离账本临时服务 `/api/scan` 返回 `tick.status=processed` 和 `proposal.status=placeable`。
+- Headless Playwright 确认“扫描一次”按钮可见。
+
+## 剩余风险
+
+- 自动循环仍只自动 tick，不自动 scan；避免无人值守连续生成草案。
+- `scan` 依赖实时行情和分析脚本可用，行情失败时会失败关闭。
+
+---
+
+# BTC Paper 自动运行 Scan 模式审查
+
+- 生成时间：2026-05-31 03:05（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`web/`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，仍保持半自动 paper 边界
+- 综合评分：93/100
+
+## 已完成
+
+1. 自动运行支持 `tick` 与 `scan` 两种模式。
+2. `/api/auto/start` 接收 `mode=tick|scan`，非法模式会被拒绝。
+3. `scan` 模式调用 `command_scan`，只执行 `tick -> propose`，不会确认挂单。
+4. 前端自动运行面板新增模式选择，并在状态行显示当前模式。
+5. 测试覆盖 scan 模式调用和非法模式拒绝。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：25 个测试通过。
+- 隔离账本临时服务验证 `mode=scan` 自动运行，停止后 `last_result_status=placeable`。
+- Headless Playwright 确认自动运行模式下拉框包含 `tick` 和 `scan`。
+
+## 剩余风险
+
+- 自动运行仍依赖本地 server 进程，不是独立守护进程。
+- scan 模式可能周期性生成待确认草案，但不会自动挂单。
+
+---
+
+# BTC Paper Init 备份审查
+
+- 生成时间：2026-05-31 13:22（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，降低误重置导致的模拟账本历史丢失风险
+- 综合评分：93/100
+
+## 已完成
+
+1. `init` 在覆盖已有 paper 账本前自动复制旧账本到同目录 `backups/`。
+2. `init` 返回 `backup_path`，便于 CLI、Web 日志和审计追踪。
+3. 测试覆盖第二次 `init` 的备份文件存在性和内容正确性。
+4. 文档明确重置前会自动备份旧 paper JSON。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：26 个测试通过。
+- 隔离账本临时服务连续两次 `/api/init` 验证：第二次返回 `backup_path`。
+- 备份文件内容保留旧账本 `initial_balance=500.0`。
+
+## 剩余风险
+
+- 备份文件暂不自动清理，长期运行需要后续增加保留策略。
+- 前端暂未提供备份列表或恢复按钮。
+
+---
+
+# BTC Paper 备份保留策略审查
+
+- 生成时间：2026-05-31 13:33（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，减少长期运行下备份目录膨胀风险
+- 综合评分：94/100
+
+## 已完成
+
+1. 默认每个账本只保留最近 20 个自动备份。
+2. 清理范围限定为同名账本在 `backups/` 下的自动备份文件。
+3. 测试覆盖超过保留数时删除旧备份并保留最新备份。
+4. 文档说明 `init` 备份默认保留最近 20 个。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：27 个测试通过。
+
+## 剩余风险
+
+- 保留数量仍是代码常量，暂未暴露为 CLI 配置。
+- 暂无前端备份管理和恢复能力。

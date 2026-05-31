@@ -148,8 +148,68 @@ class PaperBotUnitTest(unittest.TestCase):
         self.assertEqual(summary["profit_factor"], 5.0)
         self.assertEqual(summary["net_pnl_usdt"], 4.5)
 
+    def test_risk_summary_reports_daily_remaining_and_risk_caps(self):
+        state = paper_bot.initial_state(500)
+        state["closed_trades"].append({
+            "closed_at": paper_bot.today_utc() + "T00:00:00Z",
+            "realized_pnl": -3.0,
+        })
+        summary = paper_bot.risk_summary(state)
+        self.assertEqual(summary["standard_risk_usdt"], 2.5)
+        self.assertEqual(summary["max_risk_usdt"], 5.0)
+        self.assertEqual(summary["daily_loss_limit_usdt"], 10.0)
+        self.assertEqual(summary["daily_loss_used_usdt"], 3.0)
+        self.assertEqual(summary["daily_loss_remaining_usdt"], 7.0)
+        self.assertFalse(summary["risk_locked"])
+        self.assertEqual(summary["max_leverage"], 3.0)
+
+    def test_pause_and_resume_update_manual_control_state(self):
+        state = paper_bot.initial_state(500)
+        pause_event = paper_bot.pause_trading(state, "test_pause")
+        self.assertTrue(state["trading_paused"])
+        self.assertEqual(state["pause_reason"], "test_pause")
+        self.assertEqual(pause_event["event_type"], "manual_pause")
+        resume_event = paper_bot.resume_trading(state, "test_resume")
+        self.assertFalse(state["trading_paused"])
+        self.assertIsNone(state["pause_reason"])
+        self.assertEqual(resume_event["event_type"], "manual_resume")
+
 
 class PaperBotCliTest(unittest.TestCase):
+    def test_init_backs_up_existing_state_before_reset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            first = self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            self.assertIsNone(first["backup_path"])
+            second = self.run_cli(["init", "--balance", "600", "--state-path", str(state_path)], env)
+            backup_path = Path(second["backup_path"])
+            self.assertTrue(backup_path.exists())
+            backup_state = json.loads(backup_path.read_text(encoding="utf-8"))
+            current_state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(backup_state["initial_balance"], 500.0)
+            self.assertEqual(current_state["initial_balance"], 600.0)
+
+    def test_backup_pruning_keeps_recent_state_backups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            backup_dir = Path(tmpdir) / "backups"
+            backup_dir.mkdir()
+            for index in range(22):
+                backup_path = backup_dir / f"paper_state.20260101_0000{index:02d}.{index:08d}.json"
+                backup_path.write_text(json.dumps({"index": index}), encoding="utf-8")
+                os.utime(backup_path, (index, index))
+
+            removed = paper_bot.prune_state_backups(state_path, keep=20)
+            remaining = paper_bot.state_backup_files(state_path)
+            remaining_names = {path.name for path in remaining}
+
+            self.assertEqual(len(removed), 2)
+            self.assertEqual(len(remaining), 20)
+            self.assertNotIn("paper_state.20260101_000000.00000000.json", remaining_names)
+            self.assertNotIn("paper_state.20260101_000001.00000001.json", remaining_names)
+            self.assertIn("paper_state.20260101_000021.00000021.json", remaining_names)
+
     def test_init_propose_place_tick_status_flow_with_fixtures(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -243,6 +303,64 @@ class PaperBotCliTest(unittest.TestCase):
             stored = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["positions"][0]["remaining_contracts"], 10)
             self.assertEqual(stored["closed_trades"], [])
+
+    def test_scan_ticks_then_generates_proposal_with_fixtures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            state_path = tmp / "paper_state.json"
+            analysis_path = tmp / "analysis.json"
+            market_path = tmp / "market.json"
+            analysis_path.write_text(json.dumps(FIXTURE_ANALYSIS), encoding="utf-8")
+            market_path.write_text(json.dumps({
+                "candle": {
+                    "time": 1779479580000,
+                    "open": 76000.0,
+                    "high": 77250.0,
+                    "low": 75500.0,
+                    "close": 77150.0,
+                    "volume": 1000.0,
+                },
+                "ticker": {
+                    "price": 77150.0,
+                    "fair_price": 77150.0,
+                    "funding_rate": 0.00001,
+                    "timestamp": 1779479580000,
+                }
+            }), encoding="utf-8")
+            env = os.environ.copy()
+            env["PAPER_BOT_ANALYSIS_FIXTURE"] = str(analysis_path)
+            env["PAPER_BOT_MARKET_FIXTURE"] = str(market_path)
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            scan = self.run_cli([
+                "scan", "--symbol", "BTCUSDT", "--side", "short", "--state-path", str(state_path)
+            ], env)
+            self.assertTrue(scan["ok"])
+            self.assertEqual(scan["tick"]["status"], "processed")
+            self.assertEqual(scan["proposal"]["status"], "placeable")
+            stored = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(len([p for p in stored["pending_plans"] if p["status"] == "pending"]), 1)
+
+    def test_pause_blocks_propose_before_market_calls(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            init = self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            self.assertTrue(init["ok"])
+            paused = self.run_cli([
+                "pause", "--reason", "manual_test", "--state-path", str(state_path)
+            ], env)
+            self.assertEqual(paused["status"], "paused")
+            proposal = self.run_cli([
+                "propose", "--symbol", "BTCUSDT", "--side", "short", "--state-path", str(state_path)
+            ], env)
+            self.assertEqual(proposal["status"], "paused")
+            self.assertEqual(proposal["pause_reason"], "manual_test")
+            resumed = self.run_cli([
+                "resume", "--reason", "manual_test_done", "--state-path", str(state_path)
+            ], env)
+            self.assertEqual(resumed["status"], "resumed")
+            status = self.run_cli(["status", "--no-market", "--state-path", str(state_path)], env)
+            self.assertFalse(status["trading_paused"])
 
     def run_cli(self, args, env):
         completed = subprocess.run(

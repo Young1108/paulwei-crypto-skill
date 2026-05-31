@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -56,10 +57,88 @@ class AutoTickControllerTest(unittest.TestCase):
         self.assertEqual(snapshot["last_result_status"], "error")
         self.assertIn("fixture failure", snapshot["last_error"])
 
+    def test_auto_tick_controller_passes_configured_state_path(self):
+        seen = {}
+
+        def fake_tick(args):
+            seen["state_path"] = args.state_path
+            return {"ok": True, "status": "processed"}
+
+        expected_path = str(Path("/tmp/paper_state_fixture.json").expanduser().resolve())
+        controller = paper_server.AutoTickController(tick_func=fake_tick, default_interval=60)
+        controller.set_state_path(expected_path)
+        result = controller.tick_once()
+        snapshot = controller.snapshot()
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen["state_path"], expected_path)
+        self.assertEqual(snapshot["state_path"], expected_path)
+
+    def test_auto_tick_controller_scan_mode_calls_scan_func(self):
+        seen = {}
+
+        def fake_scan(args):
+            seen["state_path"] = args.state_path
+            seen["risk_pct"] = args.risk_pct
+            seen["leverage"] = args.leverage
+            return {"ok": True, "command": "scan", "proposal": {"status": "placeable"}}
+
+        controller = paper_server.AutoTickController(
+            tick_func=lambda _args: {"ok": True, "status": "processed"},
+            scan_func=fake_scan,
+            default_interval=60,
+        )
+        controller.set_state_path("/private/tmp/scan_mode_state.json")
+        controller.start(
+            interval_seconds=60,
+            mode="scan",
+            scan_symbol="BTCUSDT",
+            scan_side="short",
+            scan_risk_pct=0.0025,
+            scan_leverage=2,
+        )
+        try:
+            result = controller.tick_once()
+        finally:
+            controller.stop()
+        snapshot = controller.snapshot()
+        self.assertEqual(result["command"], "scan")
+        self.assertEqual(seen["state_path"], "/private/tmp/scan_mode_state.json")
+        self.assertEqual(seen["risk_pct"], 0.0025)
+        self.assertEqual(seen["leverage"], 2.0)
+        self.assertEqual(snapshot["mode"], "scan")
+        self.assertEqual(snapshot["last_result_status"], "placeable")
+
     def test_api_interval_validation(self):
         with self.assertRaises(paper_server.paper_bot.PaperBotError):
             paper_server.validate_auto_interval(1)
         self.assertEqual(paper_server.validate_auto_interval(60), 60.0)
+
+    def test_auto_mode_validation(self):
+        self.assertEqual(paper_server.validate_auto_mode("scan"), "scan")
+        with self.assertRaises(paper_server.paper_bot.PaperBotError):
+            paper_server.validate_auto_mode("place")
+
+    def test_export_state_payload_contains_paper_only_ledger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            state = paper_server.paper_bot.initial_state(500)
+            paper_server.paper_bot.save_state(state_path, state)
+            payload = paper_server.export_state_payload(state_path)
+            serialized = paper_server.json.dumps(payload, ensure_ascii=False).lower()
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["paper_only"])
+        self.assertEqual(payload["command"], "export/state")
+        self.assertEqual(payload["ledger"]["cash_balance"], 500.0)
+        self.assertNotIn("api_key", serialized)
+        self.assertNotIn("private_key", serialized)
+        self.assertNotIn("mnemonic", serialized)
+
+    def test_export_state_payload_requires_initialized_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "missing_state.json"
+            with self.assertRaises(paper_server.paper_bot.PaperBotError):
+                paper_server.export_state_payload(state_path)
 
 
 if __name__ == "__main__":

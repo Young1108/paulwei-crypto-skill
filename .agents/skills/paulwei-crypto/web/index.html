@@ -32,9 +32,21 @@
         <div class="actions">
           <button id="initBtn" class="secondary">重置 500U 模拟账户</button>
           <button id="proposeBtn" class="primary">生成做空草案</button>
+          <button id="scanBtn">扫描一次</button>
           <button id="placeBtn">确认为模拟挂单</button>
           <button id="tickBtn">刷新行情并模拟成交</button>
           <button id="cancelBtn" class="danger">取消草案/挂单</button>
+        </div>
+
+        <div class="manual-guard">
+          <div>
+            <strong>新草案</strong>
+            <span id="pauseStatusText">读取中</span>
+          </div>
+          <div class="guard-controls">
+            <button id="pauseBtn" class="danger">暂停新草案</button>
+            <button id="resumeBtn" class="ghost">恢复</button>
+          </div>
         </div>
 
         <div class="auto-run">
@@ -43,6 +55,13 @@
             <span id="autoStatusText">未启动</span>
           </div>
           <div class="auto-controls">
+            <label class="inline-field">
+              <span>模式</span>
+              <select id="autoModeInput">
+                <option value="tick">Tick</option>
+                <option value="scan">Scan</option>
+              </select>
+            </label>
             <label class="inline-field">
               <span>间隔</span>
               <input id="autoIntervalInput" type="number" value="60" min="5" max="3600" step="5">
@@ -108,6 +127,40 @@
 
       <section class="panel">
         <div class="section-head">
+          <h2>风险 / 事件</h2>
+          <span id="riskEventBadge">0</span>
+        </div>
+        <div class="risk-grid">
+          <article class="mini-metric">
+            <span>单笔标准风险</span>
+            <strong id="standardRiskValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>单笔最大风险</span>
+            <strong id="maxRiskCapValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>日亏损余量</span>
+            <strong id="dailyRiskRemainingValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>日亏损上限</span>
+            <strong id="dailyRiskLimitValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>杠杆上限</span>
+            <strong id="maxLeverageValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>控制状态</span>
+            <strong id="controlStateValue">--</strong>
+          </article>
+        </div>
+        <div id="riskEventsView" class="empty">暂无风控事件</div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
           <h2>当前草案</h2>
           <span id="planBadge">0</span>
         </div>
@@ -126,7 +179,10 @@
       <section class="panel">
         <div class="section-head">
           <h2>绩效 / 历史</h2>
-          <span id="tradeCountBadge">0</span>
+          <div class="section-actions">
+            <span id="tradeCountBadge">0</span>
+            <button id="exportStateBtn" class="ghost">导出账本</button>
+          </div>
         </div>
         <div class="performance-grid">
           <article class="mini-metric">
@@ -153,6 +209,13 @@
             <span>当前回撤</span>
             <strong id="currentDrawdownValue">--</strong>
           </article>
+        </div>
+        <div class="equity-chart">
+          <div class="chart-head">
+            <h3>权益曲线</h3>
+            <span id="equityCurveText">暂无权益快照</span>
+          </div>
+          <canvas id="equityCurveCanvas" width="960" height="260"></canvas>
         </div>
         <div class="history-grid">
           <div>

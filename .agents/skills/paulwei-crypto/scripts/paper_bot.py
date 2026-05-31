@@ -11,12 +11,14 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -46,6 +48,7 @@ DAILY_LOSS_LOCK_PCT = 0.02
 PLAN_EXPIRY_SECONDS = 4 * 60 * 60
 CANDLE_INTERVAL_MS = 60 * 1000
 MARKET_STALE_SECONDS = 30
+BACKUP_RETENTION_COUNT = 20
 
 
 class PaperBotError(Exception):
@@ -156,6 +159,43 @@ def save_state(path, state):
     tmp_path.replace(path)
 
 
+def backup_state_file(path):
+    if not path.exists():
+        return None
+    backup_dir = path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = utc_now().replace("-", "").replace(":", "").replace("T", "_").replace("Z", "")
+    backup_path = backup_dir / f"{path.stem}.{timestamp}.{uuid.uuid4().hex[:8]}{path.suffix}"
+    shutil.copy2(path, backup_path)
+    prune_state_backups(path)
+    return backup_path
+
+
+def state_backup_files(path):
+    backup_dir = path.parent / "backups"
+    if not backup_dir.exists():
+        return []
+    pattern = f"{path.stem}.*{path.suffix}"
+    return sorted(
+        backup_dir.glob(pattern),
+        key=lambda item: (item.stat().st_mtime, item.name),
+        reverse=True,
+    )
+
+
+def prune_state_backups(path, keep=BACKUP_RETENTION_COUNT):
+    keep_count = max(1, int(keep))
+    backup_files = state_backup_files(path)
+    removed = []
+    for backup_file in backup_files[keep_count:]:
+        try:
+            backup_file.unlink()
+            removed.append(str(backup_file))
+        except FileNotFoundError:
+            continue
+    return removed
+
+
 def initial_state(balance):
     now = utc_now()
     return {
@@ -181,6 +221,10 @@ def initial_state(balance):
         "last_candle_time": None,
         "last_processed_candle_time": None,
         "last_market_timestamp": None,
+        "trading_paused": False,
+        "pause_reason": None,
+        "paused_at": None,
+        "resumed_at": None,
         "last_action": "initialized"
     }
 
@@ -198,8 +242,42 @@ def migrate_state(state):
     state.setdefault("last_candle_time", None)
     state.setdefault("last_processed_candle_time", None)
     state.setdefault("last_market_timestamp", None)
+    state.setdefault("trading_paused", False)
+    state.setdefault("pause_reason", None)
+    state.setdefault("paused_at", None)
+    state.setdefault("resumed_at", None)
     state.setdefault("last_action", None)
     return state
+
+
+def append_control_event(state, event_type, reason):
+    event = {
+        "event_type": event_type,
+        "reason": reason,
+        "created_at": utc_now(),
+    }
+    state.setdefault("risk_events", []).append(event)
+    return event
+
+
+def pause_trading(state, reason):
+    now = utc_now()
+    normalized_reason = str(reason or "manual_pause").strip() or "manual_pause"
+    state["trading_paused"] = True
+    state["pause_reason"] = normalized_reason
+    state["paused_at"] = now
+    state["last_action"] = "paused"
+    return append_control_event(state, "manual_pause", normalized_reason)
+
+
+def resume_trading(state, reason):
+    now = utc_now()
+    normalized_reason = str(reason or "manual_resume").strip() or "manual_resume"
+    state["trading_paused"] = False
+    state["pause_reason"] = None
+    state["resumed_at"] = now
+    state["last_action"] = "resumed"
+    return append_control_event(state, "manual_resume", normalized_reason)
 
 
 def daily_realized_pnl(state, day=None):
@@ -684,9 +762,16 @@ def command_init(args):
     if balance <= 0:
         raise PaperBotError("balance must be positive.")
     path = state_path_from_args(args)
+    backup_path = backup_state_file(path)
     state = initial_state(balance)
     save_state(path, state)
-    return {"ok": True, "command": "init", "state_path": str(path), "state": state}
+    return {
+        "ok": True,
+        "command": "init",
+        "state_path": str(path),
+        "backup_path": str(backup_path) if backup_path else None,
+        "state": state
+    }
 
 
 def command_propose(args):
@@ -696,6 +781,18 @@ def command_propose(args):
     path = state_path_from_args(args)
     state = load_state(path)
     expired_items = expire_stale_items(state)
+
+    if state.get("trading_paused"):
+        if expired_items:
+            save_state(path, state)
+        return {
+            "ok": True,
+            "status": "paused",
+            "reason": "新草案已手动暂停；tick 仍可继续管理已有模拟挂单和持仓。",
+            "pause_reason": state.get("pause_reason"),
+            "paused_at": state.get("paused_at"),
+            "expired_items": expired_items
+        }
 
     locked, daily_pnl, lock_amount = is_risk_locked(state)
     if locked:
@@ -784,6 +881,51 @@ def command_place(args):
         "command": "place",
         "plan_id": plan["plan_id"],
         "open_orders": open_orders
+    }
+
+
+def command_pause(args):
+    path = state_path_from_args(args)
+    state = load_state(path)
+    if state.get("trading_paused"):
+        return {
+            "ok": True,
+            "command": "pause",
+            "status": "already_paused",
+            "trading_paused": True,
+            "pause_reason": state.get("pause_reason"),
+            "paused_at": state.get("paused_at"),
+        }
+    event = pause_trading(state, getattr(args, "reason", None))
+    save_state(path, state)
+    return {
+        "ok": True,
+        "command": "pause",
+        "status": "paused",
+        "trading_paused": True,
+        "event": event,
+    }
+
+
+def command_resume(args):
+    path = state_path_from_args(args)
+    state = load_state(path)
+    if not state.get("trading_paused"):
+        return {
+            "ok": True,
+            "command": "resume",
+            "status": "already_running",
+            "trading_paused": False,
+            "resumed_at": state.get("resumed_at"),
+        }
+    event = resume_trading(state, getattr(args, "reason", None))
+    save_state(path, state)
+    return {
+        "ok": True,
+        "command": "resume",
+        "status": "resumed",
+        "trading_paused": False,
+        "event": event,
     }
 
 
@@ -1029,6 +1171,34 @@ def performance_summary(state, unrealized=0.0):
     }
 
 
+def risk_summary(state):
+    initial_balance = float(state.get("initial_balance", DEFAULT_BALANCE))
+    equity = float(state.get("equity", state.get("cash_balance", initial_balance)))
+    daily_pnl = daily_realized_pnl(state)
+    daily_loss_limit = round(initial_balance * DAILY_LOSS_LOCK_PCT, 8)
+    daily_loss_used = round(max(0.0, -daily_pnl), 8)
+    daily_loss_remaining = round(max(0.0, daily_loss_limit - daily_loss_used), 8)
+    locked, _, lock_amount = is_risk_locked(state)
+    return {
+        "initial_balance_usdt": round(initial_balance, 8),
+        "equity_usdt": round(equity, 8),
+        "standard_risk_pct": STANDARD_RISK_PCT,
+        "standard_risk_usdt": round(equity * STANDARD_RISK_PCT, 8),
+        "max_risk_pct": MAX_RISK_PCT,
+        "max_risk_usdt": round(equity * MAX_RISK_PCT, 8),
+        "max_leverage": MAX_LEVERAGE,
+        "daily_realized_pnl_usdt": daily_pnl,
+        "daily_loss_limit_usdt": daily_loss_limit,
+        "daily_loss_used_usdt": daily_loss_used,
+        "daily_loss_remaining_usdt": daily_loss_remaining,
+        "daily_lock_amount_usdt": lock_amount,
+        "risk_locked": locked,
+        "trading_paused": bool(state.get("trading_paused")),
+        "pause_reason": state.get("pause_reason"),
+        "paused_at": state.get("paused_at"),
+    }
+
+
 def command_tick(args):
     path = state_path_from_args(args)
     state = load_state(path)
@@ -1091,6 +1261,24 @@ def command_tick(args):
     }
 
 
+def command_scan(args):
+    tick_payload = command_tick(args)
+    propose_args = SimpleNamespace(
+        symbol=getattr(args, "symbol", SUPPORTED_SYMBOL),
+        side=getattr(args, "side", "short"),
+        risk_pct=getattr(args, "risk_pct", STANDARD_RISK_PCT),
+        leverage=getattr(args, "leverage", MAX_LEVERAGE),
+        state_path=getattr(args, "state_path", None),
+    )
+    proposal_payload = command_propose(propose_args)
+    return {
+        "ok": True,
+        "command": "scan",
+        "tick": tick_payload,
+        "proposal": proposal_payload,
+    }
+
+
 def decorate_orders_with_market(orders, mark_price):
     decorated = []
     for order in orders:
@@ -1126,7 +1314,12 @@ def status_payload(state, market=None, market_error=None, expired_items=None):
         "daily_realized_pnl": daily_realized_pnl(state),
         "max_drawdown_pct": state.get("max_drawdown_pct", 0),
         "performance": performance_summary(state, unrealized),
+        "risk_summary": risk_summary(state),
         "risk_locked": is_risk_locked(state)[0],
+        "trading_paused": bool(state.get("trading_paused")),
+        "pause_reason": state.get("pause_reason"),
+        "paused_at": state.get("paused_at"),
+        "resumed_at": state.get("resumed_at"),
         "position": active_pos,
         "open_orders": decorate_orders_with_market(open_orders, mark_price),
         "pending_plans": [
@@ -1188,6 +1381,16 @@ def build_parser():
     place_parser.add_argument("--state-path")
     place_parser.set_defaults(func=command_place)
 
+    pause_parser = subparsers.add_parser("pause")
+    pause_parser.add_argument("--reason", default="manual_pause")
+    pause_parser.add_argument("--state-path")
+    pause_parser.set_defaults(func=command_pause)
+
+    resume_parser = subparsers.add_parser("resume")
+    resume_parser.add_argument("--reason", default="manual_resume")
+    resume_parser.add_argument("--state-path")
+    resume_parser.set_defaults(func=command_resume)
+
     cancel_parser = subparsers.add_parser("cancel")
     cancel_parser.add_argument("--all", action="store_true")
     cancel_parser.add_argument("--plan-id")
@@ -1198,6 +1401,14 @@ def build_parser():
     tick_parser = subparsers.add_parser("tick")
     tick_parser.add_argument("--state-path")
     tick_parser.set_defaults(func=command_tick)
+
+    scan_parser = subparsers.add_parser("scan")
+    scan_parser.add_argument("--symbol", default=SUPPORTED_SYMBOL)
+    scan_parser.add_argument("--side", default="short", choices=["short"])
+    scan_parser.add_argument("--risk-pct", type=float, default=STANDARD_RISK_PCT)
+    scan_parser.add_argument("--leverage", type=float, default=MAX_LEVERAGE)
+    scan_parser.add_argument("--state-path")
+    scan_parser.set_defaults(func=command_scan)
 
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--state-path")

@@ -26,10 +26,24 @@ DEFAULT_PORT = 8787
 DEFAULT_AUTO_TICK_INTERVAL_SECONDS = 60
 MIN_AUTO_TICK_INTERVAL_SECONDS = 5
 MAX_AUTO_TICK_INTERVAL_SECONDS = 3600
+AUTO_MODES = {"tick", "scan"}
 
 
 def json_bytes(payload):
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def export_state_payload(state_path=None):
+    path = Path(state_path).expanduser().resolve() if state_path else paper_bot.DEFAULT_STATE_PATH
+    state = paper_bot.load_state(path)
+    return {
+        "ok": True,
+        "command": "export/state",
+        "paper_only": True,
+        "schema_version": 1,
+        "generated_at": paper_bot.utc_now(),
+        "ledger": state,
+    }
 
 
 def validate_auto_interval(value):
@@ -48,11 +62,25 @@ def validate_auto_interval(value):
     return interval
 
 
+def validate_auto_mode(value):
+    mode = str(value or "tick").strip().lower()
+    if mode not in AUTO_MODES:
+        raise paper_bot.PaperBotError("auto mode must be tick or scan.")
+    return mode
+
+
 class AutoTickController:
     """本地 paper 自动 tick 控制器，只调用模拟账本，不触达真实交易接口。"""
 
-    def __init__(self, tick_func=None, default_interval=DEFAULT_AUTO_TICK_INTERVAL_SECONDS):
+    def __init__(self, tick_func=None, scan_func=None, default_interval=DEFAULT_AUTO_TICK_INTERVAL_SECONDS):
         self.tick_func = tick_func or paper_bot.command_tick
+        self.scan_func = scan_func or paper_bot.command_scan
+        self.state_path = None
+        self.mode = "tick"
+        self.scan_symbol = paper_bot.SUPPORTED_SYMBOL
+        self.scan_side = "short"
+        self.scan_risk_pct = paper_bot.STANDARD_RISK_PCT
+        self.scan_leverage = paper_bot.MAX_LEVERAGE
         self.interval_seconds = float(default_interval)
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -66,6 +94,10 @@ class AutoTickController:
         self.last_result_status = None
         self.tick_count = 0
         self.error_count = 0
+
+    def set_state_path(self, state_path):
+        with self._lock:
+            self.state_path = str(Path(state_path).expanduser().resolve()) if state_path else None
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -84,9 +116,15 @@ class AutoTickController:
                 "last_result_status": self.last_result_status,
                 "tick_count": self.tick_count,
                 "error_count": self.error_count,
+                "state_path": self.state_path,
+                "mode": self.mode,
+                "scan_symbol": self.scan_symbol,
+                "scan_side": self.scan_side,
+                "scan_risk_pct": self.scan_risk_pct,
+                "scan_leverage": self.scan_leverage,
             }
 
-    def start(self, interval_seconds=None):
+    def start(self, interval_seconds=None, mode=None, scan_symbol=None, scan_side=None, scan_risk_pct=None, scan_leverage=None):
         with self._lock:
             if self.is_running():
                 snapshot = self.snapshot()
@@ -95,6 +133,19 @@ class AutoTickController:
 
             if interval_seconds is not None:
                 self.interval_seconds = float(interval_seconds)
+            if mode is not None:
+                self.mode = validate_auto_mode(mode)
+            if scan_symbol is not None:
+                self.scan_symbol = paper_bot.normalize_symbol(str(scan_symbol))
+            if scan_side is not None:
+                if scan_side != "short":
+                    raise paper_bot.PaperBotError("auto scan only supports short.")
+                self.scan_side = scan_side
+            if scan_risk_pct is not None:
+                self.scan_risk_pct = float(scan_risk_pct)
+            if scan_leverage is not None:
+                paper_bot.validate_leverage(float(scan_leverage))
+                self.scan_leverage = float(scan_leverage)
             self._stop_event.clear()
             self.started_at = paper_bot.utc_now()
             self.stopped_at = None
@@ -127,7 +178,16 @@ class AutoTickController:
     def tick_once(self):
         tick_started_at = paper_bot.utc_now()
         try:
-            payload = self.tick_func(SimpleNamespace(state_path=None))
+            with self._lock:
+                mode = self.mode
+                args = SimpleNamespace(
+                    state_path=self.state_path,
+                    symbol=self.scan_symbol,
+                    side=self.scan_side,
+                    risk_pct=self.scan_risk_pct,
+                    leverage=self.scan_leverage,
+                )
+            payload = self.scan_func(args) if mode == "scan" else self.tick_func(args)
         except Exception as exc:  # noqa: BLE001 - 自动循环必须记录错误并继续运行。
             with self._lock:
                 self.last_tick_at = tick_started_at
@@ -142,7 +202,11 @@ class AutoTickController:
             self.last_success_at = paper_bot.utc_now()
             self.last_error = None
             self.tick_count += 1
-            self.last_result_status = payload.get("status", "ok")
+            self.last_result_status = (
+                payload.get("status")
+                or payload.get("proposal", {}).get("status")
+                or payload.get("command", "ok")
+            )
         return payload
 
     def _run_loop(self):
@@ -160,7 +224,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("[paper-server] " + fmt % args + "\n")
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, extra_headers=None):
         body = json_bytes(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -168,6 +232,8 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:%s" % self.server.server_port)
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -198,6 +264,9 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise paper_bot.PaperBotError("invalid JSON body") from exc
 
+    def state_path(self):
+        return getattr(self.server, "paper_state_path", None)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:%s" % self.server.server_port)
@@ -217,6 +286,15 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                 "exchange": "mexc",
                 "auto_tick": AUTO_TICK.snapshot()
             })
+            return
+        if parsed.path == "/api/export/state":
+            try:
+                self.send_json(
+                    export_state_payload(self.state_path()),
+                    extra_headers={"Content-Disposition": 'attachment; filename="paper_state_export.json"'},
+                )
+            except paper_bot.PaperBotError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
         self.send_static(parsed.path)
 
@@ -238,7 +316,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
             if action == "init":
                 args = SimpleNamespace(
                     balance=float(payload.get("balance", paper_bot.DEFAULT_BALANCE)),
-                    state_path=None,
+                    state_path=self.state_path(),
                 )
                 self.send_json(paper_bot.command_init(args))
                 return
@@ -248,7 +326,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                     side=str(payload.get("side", "short")),
                     risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
                     leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
-                    state_path=None,
+                    state_path=self.state_path(),
                 )
                 self.send_json(paper_bot.command_propose(args))
                 return
@@ -256,24 +334,48 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                 plan_id = str(payload.get("plan_id", "")).strip()
                 if not plan_id:
                     raise paper_bot.PaperBotError("plan_id is required")
-                args = SimpleNamespace(plan_id=plan_id, state_path=None)
+                args = SimpleNamespace(plan_id=plan_id, state_path=self.state_path())
                 self.send_json(paper_bot.command_place(args))
+                return
+            if action == "pause":
+                args = SimpleNamespace(
+                    reason=str(payload.get("reason", "manual_pause")).strip() or "manual_pause",
+                    state_path=self.state_path(),
+                )
+                self.send_json(paper_bot.command_pause(args))
+                return
+            if action == "resume":
+                args = SimpleNamespace(
+                    reason=str(payload.get("reason", "manual_resume")).strip() or "manual_resume",
+                    state_path=self.state_path(),
+                )
+                self.send_json(paper_bot.command_resume(args))
                 return
             if action == "cancel":
                 args = SimpleNamespace(
                     all=bool(payload.get("all", False)),
                     plan_id=str(payload.get("plan_id", "")).strip() or None,
                     order_id=str(payload.get("order_id", "")).strip() or None,
-                    state_path=None,
+                    state_path=self.state_path(),
                 )
                 self.send_json(paper_bot.command_cancel(args))
                 return
             if action == "tick":
-                args = SimpleNamespace(state_path=None)
+                args = SimpleNamespace(state_path=self.state_path())
                 self.send_json(paper_bot.command_tick(args))
                 return
+            if action == "scan":
+                args = SimpleNamespace(
+                    symbol=str(payload.get("symbol", "BTCUSDT")),
+                    side=str(payload.get("side", "short")),
+                    risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
+                    leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
+                    state_path=self.state_path(),
+                )
+                self.send_json(paper_bot.command_scan(args))
+                return
             if action == "status":
-                args = SimpleNamespace(state_path=None, no_market=bool(payload.get("no_market", False)))
+                args = SimpleNamespace(state_path=self.state_path(), no_market=bool(payload.get("no_market", False)))
                 status_payload = paper_bot.command_status(args)
                 status_payload["auto_tick"] = AUTO_TICK.snapshot()
                 self.send_json(status_payload)
@@ -282,7 +384,19 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                 interval = validate_auto_interval(
                     payload.get("interval_seconds", DEFAULT_AUTO_TICK_INTERVAL_SECONDS)
                 )
-                self.send_json({"ok": True, "command": "auto/start", "auto_tick": AUTO_TICK.start(interval)})
+                mode = validate_auto_mode(payload.get("mode", "tick"))
+                self.send_json({
+                    "ok": True,
+                    "command": "auto/start",
+                    "auto_tick": AUTO_TICK.start(
+                        interval,
+                        mode=mode,
+                        scan_symbol=str(payload.get("symbol", "BTCUSDT")),
+                        scan_side=str(payload.get("side", "short")),
+                        scan_risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
+                        scan_leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
+                    )
+                })
                 return
             if action == "auto/stop":
                 self.send_json({"ok": True, "command": "auto/stop", "auto_tick": AUTO_TICK.stop()})
@@ -299,12 +413,15 @@ def main():
     parser = argparse.ArgumentParser(description="Run local BTC paper bot web UI.")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--state-path", help="Use an isolated paper ledger path for this server.")
     args = parser.parse_args()
 
     if not WEB_DIR.exists():
         raise SystemExit(f"web directory not found: {WEB_DIR}")
 
     server = ThreadingHTTPServer((args.host, args.port), PaperRequestHandler)
+    server.paper_state_path = str(Path(args.state_path).expanduser().resolve()) if args.state_path else None
+    AUTO_TICK.set_state_path(server.paper_state_path)
     print(f"Paper bot UI: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()

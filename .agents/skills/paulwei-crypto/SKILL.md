@@ -366,7 +366,10 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 ```bash
 python3 scripts/paper_bot.py init --balance 500
 python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
+python3 scripts/paper_bot.py scan --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
+python3 scripts/paper_bot.py pause --reason manual_review
+python3 scripts/paper_bot.py resume --reason manual_review_done
 python3 scripts/paper_bot.py cancel --all
 python3 scripts/paper_bot.py tick
 python3 scripts/paper_bot.py status
@@ -378,30 +381,44 @@ python3 scripts/paper_bot.py status
 python3 scripts/paper_server.py --host 127.0.0.1 --port 8787
 ```
 
+需要隔离演练账本时使用：
+```bash
+python3 scripts/paper_server.py --host 127.0.0.1 --port 8787 --state-path /private/tmp/btc-paper-demo.json
+```
+
 打开 `http://127.0.0.1:8787` 后，可在界面里执行初始化、生成草案、确认模拟挂单、tick 和状态刷新。
 
 最小使用流程：
-1. 重置 500U 模拟账户。
-2. 生成做空草案。
+1. 重置 500U 模拟账户；若旧账本存在，系统会先备份到 `backups/`。
+2. 生成做空草案；或执行扫描一次，先推进 tick 再尝试生成草案。
 3. 接受草案风险后确认为模拟挂单。
 4. 不想继续等待时取消草案/挂单。
-5. 持续手动刷新行情并模拟成交，或启动自动 tick 让本地服务按间隔推进模拟账本。
+5. 需要人工熔断时暂停新草案，恢复后再继续生成新计划。
+6. 持续手动刷新行情并模拟成交，或启动自动运行；自动运行支持 `Tick` 或 `Scan`，`Scan` 只生成待确认草案。
 
-界面显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、绩效统计和最近交易历史，并每 15 秒自动刷新。若挂单离现价较远，说明策略在等待反弹到限价区，并不代表数据未更新。
+界面显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、最近风控事件、绩效统计、权益曲线和最近交易历史，并每 15 秒自动刷新。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单离现价较远，说明策略在等待反弹到限价区，并不代表数据未更新。
 
 ### 强制边界
 
 - v1 只支持 `BTCUSDT` / MEXC `BTC_USDT`。
 - 不读取、不保存、不打印私钥、助记词、交易所 API Key。
 - 不连接真实账户，不调用真实下单接口。
+- `init` 重置已有账本前必须自动备份旧 paper JSON，并默认只保留最近 20 个备份。
 - `propose` 只生成订单草案；`place` 只把草案放入 paper 账本。
+- `scan` 只能执行 `tick -> propose`，不得确认挂单或真实下单。
+- `pause` 只暂停新草案生成，不得取消已有模拟挂单或干预已有持仓退出。
+- `resume` 只恢复新草案生成，不得自动生成或放置新订单。
+- `status` 必须返回 `risk_summary`，包含单笔风险、日亏损余量、日亏损上限和控制状态。
 - `cancel` 只取消待确认草案或开放模拟挂单，不影响真实账户。
 - `tick` 对同一根 1 分钟 K 线幂等，重复点击不得重复成交或重复止盈止损。
 - 新挂单不得使用创建所在 K 线的历史 high/low 触发乐观成交。
 - 草案和开放入场挂单过期后必须自动失效。
 - 自动 tick 只能在本地 paper server 进程内运行；服务关闭后必须停止。
+- 自动运行 `scan` 模式只能执行 `tick -> propose`，不得自动确认挂单。
 - 自动 tick 行情失败时只记录错误，不得用旧数据模拟交易。
 - 每次有效 tick 必须记录权益快照；`status` 必须返回最近权益快照、最近已平仓交易和绩效统计。
+- `/api/export/state` 只能导出本地 paper 账本 JSON，不得包含真实账户凭据。
+- `paper_server.py --state-path` 必须让自动 tick 和全部 API 使用同一个隔离账本路径。
 - 如果日内累计亏损达到账户 `2%`，`propose` 必须返回 `risk_locked`。
 
 ### 默认风控
