@@ -6,6 +6,9 @@ const els = {
   balanceInput: document.querySelector("#balanceInput"),
   riskInput: document.querySelector("#riskInput"),
   leverageInput: document.querySelector("#leverageInput"),
+  proposalCooldownInput: document.querySelector("#proposalCooldownInput"),
+  saveSettingsBtn: document.querySelector("#saveSettingsBtn"),
+  settingsStatusText: document.querySelector("#settingsStatusText"),
   initBtn: document.querySelector("#initBtn"),
   proposeBtn: document.querySelector("#proposeBtn"),
   scanBtn: document.querySelector("#scanBtn"),
@@ -15,13 +18,20 @@ const els = {
   pauseBtn: document.querySelector("#pauseBtn"),
   resumeBtn: document.querySelector("#resumeBtn"),
   pauseStatusText: document.querySelector("#pauseStatusText"),
+  preflightBtn: document.querySelector("#preflightBtn"),
+  preflightStatusText: document.querySelector("#preflightStatusText"),
+  preflightChecksView: document.querySelector("#preflightChecksView"),
   autoStartBtn: document.querySelector("#autoStartBtn"),
   autoStopBtn: document.querySelector("#autoStopBtn"),
   autoModeInput: document.querySelector("#autoModeInput"),
   autoIntervalInput: document.querySelector("#autoIntervalInput"),
+  autoMaxErrorInput: document.querySelector("#autoMaxErrorInput"),
   autoStatusText: document.querySelector("#autoStatusText"),
   refreshBtn: document.querySelector("#refreshBtn"),
   exportStateBtn: document.querySelector("#exportStateBtn"),
+  backupRefreshBtn: document.querySelector("#backupRefreshBtn"),
+  backupCountBadge: document.querySelector("#backupCountBadge"),
+  backupsView: document.querySelector("#backupsView"),
   clearLogBtn: document.querySelector("#clearLogBtn"),
   marketPriceValue: document.querySelector("#marketPriceValue"),
   marketChangeValue: document.querySelector("#marketChangeValue"),
@@ -38,6 +48,8 @@ const els = {
   dailyRiskLimitValue: document.querySelector("#dailyRiskLimitValue"),
   maxLeverageValue: document.querySelector("#maxLeverageValue"),
   controlStateValue: document.querySelector("#controlStateValue"),
+  proposalCooldownValue: document.querySelector("#proposalCooldownValue"),
+  lastProposalValue: document.querySelector("#lastProposalValue"),
   netPnlValue: document.querySelector("#netPnlValue"),
   realizedPnlValue: document.querySelector("#realizedPnlValue"),
   unrealizedPnlValue: document.querySelector("#unrealizedPnlValue"),
@@ -97,10 +109,13 @@ function setBusy(busy) {
     els.cancelBtn,
     els.pauseBtn,
     els.resumeBtn,
+    els.preflightBtn,
     els.autoStartBtn,
     els.autoStopBtn,
+    els.saveSettingsBtn,
     els.refreshBtn,
     els.exportStateBtn,
+    els.backupRefreshBtn,
   ].forEach((button) => {
     button.disabled = busy;
   });
@@ -143,7 +158,9 @@ function renderDataLine(status) {
   const actionText = actionMap[status.last_action] || status.last_action || "无";
   const auto = status.auto_tick || {};
   const autoMode = auto.mode === "scan" ? "Scan" : "Tick";
-  const autoText = auto.running ? `自动运行中，${autoMode}，每 ${fmt(auto.interval_seconds, 0)} 秒` : "自动未启动";
+  const autoText = auto.halted_at
+    ? `自动已熔断，${autoMode}`
+    : (auto.running ? `自动运行中，${autoMode}，每 ${fmt(auto.interval_seconds, 0)} 秒` : "自动未启动");
   els.dataStatusText.textContent = `行情状态：${marketText}，延迟 ${age}；上次 Tick：${tickText}；账本动作：${actionText}；${autoText}`;
 }
 
@@ -160,14 +177,58 @@ function renderPauseStatus(status) {
 
 function renderAutoStatus(autoTick) {
   const auto = autoTick || {};
-  const runningText = auto.running ? "运行中" : "已停止";
+  if (document.activeElement !== els.autoMaxErrorInput && auto.max_consecutive_errors) {
+    els.autoMaxErrorInput.value = String(auto.max_consecutive_errors);
+  }
+  const runningText = auto.halted_at ? "已熔断" : (auto.running ? "运行中" : "已停止");
   const modeText = auto.mode === "scan" ? "Scan" : "Tick";
   const intervalText = Number.isFinite(Number(auto.interval_seconds))
     ? `${fmt(auto.interval_seconds, 0)} 秒`
     : "--";
   const lastTickText = auto.last_tick_at ? fmtTime(auto.last_tick_at) : "尚未执行";
+  const consecutiveText = `连续错误 ${auto.consecutive_error_count || 0}/${auto.max_consecutive_errors || 3}`;
   const errorText = auto.last_error ? `；最近错误：${auto.last_error}` : "";
-  els.autoStatusText.textContent = `${runningText} · ${modeText} · 间隔 ${intervalText} · 成功 ${auto.tick_count || 0} 次 · 错误 ${auto.error_count || 0} 次 · 上次 ${lastTickText}${errorText}`;
+  const haltText = auto.halt_reason ? `；熔断：${auto.halt_reason}` : "";
+  els.autoStatusText.textContent = `${runningText} · ${modeText} · 间隔 ${intervalText} · 成功 ${auto.tick_count || 0} 次 · 错误 ${auto.error_count || 0} 次 · ${consecutiveText} · 上次 ${lastTickText}${errorText}${haltText}`;
+  els.autoStatusText.className = auto.halted_at ? "warning" : "";
+}
+
+function renderPreflight(payload) {
+  const status = payload.status || "unknown";
+  const statusText = {
+    pass: "自检通过",
+    warn: "自检有警告",
+    fail: "自检失败",
+  }[status] || "自检未知";
+  const failed = (payload.checks || []).filter((check) => check.status === "fail").length;
+  const warned = (payload.checks || []).filter((check) => check.status === "warn").length;
+  els.preflightStatusText.textContent = `${statusText} · 失败 ${failed} · 警告 ${warned}`;
+  els.preflightStatusText.className = status === "fail" ? "negative" : (status === "warn" ? "warning" : "positive");
+  renderPreflightChecks(payload.checks || []);
+}
+
+function renderPreflightChecks(checks) {
+  const labelMap = {
+    pass: "通过",
+    warn: "警告",
+    fail: "失败",
+    skip: "跳过",
+  };
+  els.preflightChecksView.className = checks.length ? "preflight-checks" : "preflight-checks empty";
+  els.preflightChecksView.innerHTML = checks.length
+    ? checks.map((check) => {
+        const details = Object.keys(check.details || {}).length
+          ? `<small>${JSON.stringify(check.details)}</small>`
+          : "";
+        return `
+          <article class="preflight-check ${check.status || "skip"}">
+            <strong>${labelMap[check.status] || check.status || "--"}</strong>
+            <span>${check.name || "--"} · ${check.message || "--"}</span>
+            ${details}
+          </article>
+        `;
+      }).join("")
+    : "尚未运行自检";
 }
 
 function setNextStep(status) {
@@ -184,6 +245,12 @@ function setNextStep(status) {
   if (status.trading_paused) {
     els.nextStepTitle.textContent = "新草案已暂停";
     els.nextStepText.textContent = "暂停期间不生成新草案；已有模拟挂单和持仓仍可继续 tick。";
+    return;
+  }
+  if (status.proposal_control?.cooldown_remaining_seconds > 0 && !hasPosition && !hasOrders && !hasPlan) {
+    const minutes = Math.ceil(status.proposal_control.cooldown_remaining_seconds / 60);
+    els.nextStepTitle.textContent = "等待冷却";
+    els.nextStepText.textContent = `草案生成冷却剩余约 ${minutes} 分钟，避免重复请求行情分析。`;
     return;
   }
   if (hasPosition || hasOrders) {
@@ -204,6 +271,10 @@ function setNextStep(status) {
 
 function renderStatus(status) {
   latestStatus = status;
+  if (document.activeElement !== els.proposalCooldownInput && status.proposal_control?.cooldown_seconds) {
+    els.proposalCooldownInput.value = String(status.proposal_control.cooldown_seconds);
+    els.settingsStatusText.textContent = "设置已同步";
+  }
   const market = status.market || {};
   els.marketPriceValue.textContent = market.price ? `${fmt(market.price, 1)}` : "--";
   els.marketChangeValue.textContent = Number.isFinite(Number(market.change_pct_24h))
@@ -219,7 +290,7 @@ function renderStatus(status) {
   renderDataLine(status);
   renderPauseStatus(status);
   renderAutoStatus(status.auto_tick);
-  renderRiskSummary(status.risk_summary || {}, status.risk_events || []);
+  renderRiskSummary(status.risk_summary || {}, status.risk_events || [], status.proposal_control || {});
   setNextStep(status);
 
   const plans = status.pending_plans || [];
@@ -304,7 +375,7 @@ function renderPerformance(performance) {
   els.currentDrawdownValue.className = Number(performance.current_drawdown_pct) > 0 ? "warning" : "";
 }
 
-function renderRiskSummary(riskSummary, riskEvents) {
+function renderRiskSummary(riskSummary, riskEvents, proposalControl) {
   els.riskEventBadge.textContent = String(riskEvents.length || 0);
   els.standardRiskValue.textContent = `${fmt(riskSummary.standard_risk_usdt, 2)} U`;
   els.maxRiskCapValue.textContent = `${fmt(riskSummary.max_risk_usdt, 2)} U`;
@@ -317,6 +388,13 @@ function renderRiskSummary(riskSummary, riskEvents) {
     : (riskSummary.trading_paused ? "手动暂停" : "运行");
   els.controlStateValue.textContent = controlText;
   els.controlStateValue.className = riskSummary.risk_locked || riskSummary.trading_paused ? "warning" : "positive";
+  const cooldownRemaining = Number(proposalControl.cooldown_remaining_seconds || 0);
+  els.proposalCooldownValue.textContent = cooldownRemaining > 0
+    ? `${Math.ceil(cooldownRemaining / 60)} 分钟`
+    : "可生成";
+  els.proposalCooldownValue.className = cooldownRemaining > 0 ? "warning" : "positive";
+  els.lastProposalValue.textContent = proposalControl.last_proposal_status || "--";
+  els.lastProposalValue.className = proposalControl.last_proposal_status === "cooldown" ? "warning" : "";
   renderRiskEvents(riskEvents);
 }
 
@@ -357,6 +435,21 @@ function renderEquitySnapshots(snapshots) {
         </article>
       `).join("")
     : "暂无 tick 快照";
+}
+
+function renderBackups(payload) {
+  const backups = payload.backups || [];
+  els.backupCountBadge.textContent = String(backups.length);
+  els.backupsView.className = backups.length ? "history-list" : "empty";
+  els.backupsView.innerHTML = backups.length
+    ? backups.slice(0, 10).map((backup) => `
+        <article class="history-line">
+          <strong>${backup.name || "--"}</strong>
+          <span>${fmt(Number(backup.size_bytes) / 1024, 2)} KB · 保留上限 ${payload.retention_count || "--"} 个</span>
+          <small>${fmtTime(backup.modified_at)}</small>
+        </article>
+      `).join("")
+    : "暂无账本备份";
 }
 
 function renderEquityCurve(snapshots) {
@@ -460,11 +553,18 @@ async function refreshStatus(label = "状态") {
   log(label, status);
 }
 
+async function refreshBackups(label = "备份列表") {
+  const payload = await api("/api/backups");
+  renderBackups(payload);
+  log(label, payload);
+}
+
 els.initBtn.addEventListener("click", async () => {
   if (!confirm("会重置本地 paper 账本，确认继续？")) return;
   const payload = await api("/api/init", { balance: Number(els.balanceInput.value || 500) });
   log("初始化", payload);
   await refreshStatus("初始化后状态");
+  await refreshBackups("初始化后备份");
 });
 
 els.proposeBtn.addEventListener("click", async () => {
@@ -531,15 +631,25 @@ els.resumeBtn.addEventListener("click", async () => {
   await refreshStatus("恢复后状态");
 });
 
+els.preflightBtn.addEventListener("click", async () => {
+  const payload = await api("/api/preflight", {
+    mode: els.autoModeInput.value || "tick",
+  });
+  renderPreflight(payload);
+  log("运行前自检", payload);
+});
+
 els.autoStartBtn.addEventListener("click", async () => {
   const payload = await api("/api/auto/start", {
     mode: els.autoModeInput.value || "tick",
     interval_seconds: Number(els.autoIntervalInput.value || 60),
+    max_consecutive_errors: Number(els.autoMaxErrorInput.value || 3),
     symbol: "BTCUSDT",
     side: "short",
     risk_pct: Number(els.riskInput.value),
     leverage: Number(els.leverageInput.value),
   });
+  if (payload.preflight) renderPreflight(payload.preflight);
   log("启动自动运行", payload);
   await refreshStatus("自动运行状态");
 });
@@ -550,7 +660,17 @@ els.autoStopBtn.addEventListener("click", async () => {
   await refreshStatus("自动运行状态");
 });
 
+els.saveSettingsBtn.addEventListener("click", async () => {
+  const payload = await api("/api/settings", {
+    proposal_cooldown_seconds: Number(els.proposalCooldownInput.value || 900),
+  });
+  els.settingsStatusText.textContent = payload.updated ? "设置已保存" : "设置未变化";
+  log("保存设置", payload);
+  await refreshStatus("设置后状态");
+});
+
 els.refreshBtn.addEventListener("click", () => refreshStatus());
+els.backupRefreshBtn.addEventListener("click", () => refreshBackups());
 els.exportStateBtn.addEventListener("click", async () => {
   const payload = await api("/api/export/state");
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -570,6 +690,7 @@ els.clearLogBtn.addEventListener("click", () => {
 });
 
 refreshStatus("启动状态").catch(() => {});
+refreshBackups("启动备份列表").catch(() => {});
 window.addEventListener("resize", () => {
   if (latestStatus) renderEquityCurve(latestStatus.equity_snapshots || []);
 });

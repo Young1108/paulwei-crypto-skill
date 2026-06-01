@@ -105,6 +105,9 @@ check my trade: long BTC at 95k, stop at 92k, size 3%
 **命令示例**：
 ```bash
 python3 scripts/paper_bot.py init --balance 500
+python3 scripts/paper_bot.py backups
+python3 scripts/paper_bot.py settings --proposal-cooldown-seconds 900
+python3 scripts/paper_bot.py preflight --mode scan
 python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py scan --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
@@ -135,24 +138,29 @@ python3 scripts/paper_server.py --host 127.0.0.1 --port 8787 --state-path /priva
 5. 需要人工熔断时点“暂停新草案”，恢复后再继续生成新计划。
 6. 之后可以手动点“刷新行情并模拟成交”，也可以启动自动运行；自动运行支持 `Tick` 或 `Scan`，`Scan` 只生成待确认草案。
 
-前端会显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、最近风控事件、绩效统计、权益曲线和最近交易历史，并每 15 秒自动刷新状态。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单距现价较远，模拟成交不会发生，这是策略等待反弹触发，不是行情失效。
+前端会显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、草案冷却、最近风控事件、绩效统计、权益曲线、最近交易历史和账本备份列表，并每 15 秒自动刷新状态。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单距现价较远，模拟成交不会发生，这是策略等待反弹触发，不是行情失效。
 
 **v1 限制**：
 - 只支持 `BTCUSDT` / MEXC `BTC_USDT`
 - 只支持 paper 模拟，不支持真实下单或 CEX API 签名
 - `init` 重置已有账本前会自动备份旧 paper JSON，并默认只保留最近 20 个备份
+- `backups` 和 `/api/backups` 只列出同账本 `backups/` 目录的备份元数据，不恢复、不删除、不修改账本
 - 单笔标准风险 `0.5%`，单笔最大风险 `1%`
 - 最大模拟杠杆 `3x`
 - 日内累计亏损达到 `2%` 后停止生成新计划
 - 手动 `pause` 只阻止新草案生成，不会取消已有模拟挂单或干预持仓退出
 - `scan` 只执行 `tick -> propose`，不会确认挂单或真实下单
 - `status` 返回 `risk_summary`，包含单笔风险、日亏损余量、日亏损上限和控制状态
+- 行情分析型 `propose/scan` 默认有 15 分钟草案冷却，可通过本地账本 `settings` 在 60-3600 秒内调整；CLI/API 可用 `force` 人工绕过，自动运行不绕过
 - `tick` 对同一根 1 分钟 K 线幂等：重复点击只刷新权益，不重复成交或止盈止损
 - 新挂单不会用创建所在 K 线的历史 high/low 乐观成交
 - 草案和开放入场挂单过期后会自动失效
 - 自动 tick 只在本地 paper server 进程内运行；服务关闭后自动停止
+- 自动运行启动前会执行 preflight，自检失败时不得启动自动循环
 - 自动运行 `scan` 模式只执行 `tick -> propose`，不会自动确认挂单
 - 自动 tick 行情失败时只记录错误，不使用旧数据模拟交易
+- 自动运行连续错误会熔断停止，阈值默认 3 次，可在启动自动运行时设置为 1-10 次
+- CLI 和本地 Web server 使用同账本 `.lock` 文件串行化写入，降低同时操作同一 paper 账本时的数据覆盖风险
 - 每次有效 tick 记录权益快照，`status` 返回最近权益快照、最近已平仓交易和绩效统计
 - `/api/export/state` 只导出本地 paper 账本 JSON，不包含真实账户凭据
 - `paper_server.py --state-path` 可隔离本地账本，自动 tick 和全部 API 使用同一路径

@@ -7,6 +7,7 @@ BTC Paper 合约机器人 v1。
 """
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +51,9 @@ PLAN_EXPIRY_SECONDS = 4 * 60 * 60
 CANDLE_INTERVAL_MS = 60 * 1000
 MARKET_STALE_SECONDS = 30
 BACKUP_RETENTION_COUNT = 20
+PROPOSE_COOLDOWN_SECONDS = 15 * 60
+MIN_PROPOSE_COOLDOWN_SECONDS = 60
+MAX_PROPOSE_COOLDOWN_SECONDS = 60 * 60
 
 
 class PaperBotError(Exception):
@@ -101,6 +106,22 @@ def state_path_from_args(args):
     return Path(raw_path).expanduser().resolve() if raw_path else DEFAULT_STATE_PATH
 
 
+def state_lock_path(path):
+    return path.with_suffix(path.suffix + ".lock")
+
+
+@contextmanager
+def state_file_lock(path):
+    lock_path = state_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def normalize_symbol(raw_symbol):
     symbol = raw_symbol.strip().upper()
     if not SYMBOL_RE.fullmatch(symbol):
@@ -140,6 +161,47 @@ def validate_leverage(leverage):
         raise PaperBotError("leverage must be positive.")
     if leverage > MAX_LEVERAGE:
         raise PaperBotError(f"Paper v1 leverage cap is {MAX_LEVERAGE}x.")
+
+
+def validate_proposal_cooldown_seconds(value):
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError) as exc:
+        raise PaperBotError("proposal cooldown seconds must be an integer.") from exc
+    if seconds < MIN_PROPOSE_COOLDOWN_SECONDS:
+        raise PaperBotError(
+            f"proposal cooldown seconds must be >= {MIN_PROPOSE_COOLDOWN_SECONDS}."
+        )
+    if seconds > MAX_PROPOSE_COOLDOWN_SECONDS:
+        raise PaperBotError(
+            f"proposal cooldown seconds must be <= {MAX_PROPOSE_COOLDOWN_SECONDS}."
+        )
+    return seconds
+
+
+def default_settings():
+    return {
+        "proposal_cooldown_seconds": PROPOSE_COOLDOWN_SECONDS,
+    }
+
+
+def normalize_settings(raw_settings):
+    settings = default_settings()
+    if isinstance(raw_settings, dict):
+        settings.update(raw_settings)
+    try:
+        settings["proposal_cooldown_seconds"] = validate_proposal_cooldown_seconds(
+            settings.get("proposal_cooldown_seconds")
+        )
+    except PaperBotError:
+        settings["proposal_cooldown_seconds"] = PROPOSE_COOLDOWN_SECONDS
+    return settings
+
+
+def state_settings(state):
+    settings = normalize_settings(state.get("settings", {}))
+    state["settings"] = settings
+    return settings
 
 
 def load_state(path):
@@ -196,6 +258,22 @@ def prune_state_backups(path, keep=BACKUP_RETENTION_COUNT):
     return removed
 
 
+def backup_metadata(path):
+    backups = []
+    for backup_file in state_backup_files(path):
+        try:
+            stat = backup_file.stat()
+        except FileNotFoundError:
+            continue
+        backups.append({
+            "name": backup_file.name,
+            "path": str(backup_file),
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    return backups
+
+
 def initial_state(balance):
     now = utc_now()
     return {
@@ -217,6 +295,7 @@ def initial_state(balance):
         "risk_events": [],
         "funding_snapshots": [],
         "equity_snapshots": [],
+        "settings": default_settings(),
         "last_tick_at": None,
         "last_candle_time": None,
         "last_processed_candle_time": None,
@@ -225,6 +304,9 @@ def initial_state(balance):
         "pause_reason": None,
         "paused_at": None,
         "resumed_at": None,
+        "last_proposal_at": None,
+        "last_proposal_status": None,
+        "last_proposal_reason": None,
         "last_action": "initialized"
     }
 
@@ -238,6 +320,7 @@ def migrate_state(state):
     state.setdefault("risk_events", [])
     state.setdefault("funding_snapshots", [])
     state.setdefault("equity_snapshots", [])
+    state_settings(state)
     state.setdefault("last_tick_at", None)
     state.setdefault("last_candle_time", None)
     state.setdefault("last_processed_candle_time", None)
@@ -246,6 +329,9 @@ def migrate_state(state):
     state.setdefault("pause_reason", None)
     state.setdefault("paused_at", None)
     state.setdefault("resumed_at", None)
+    state.setdefault("last_proposal_at", None)
+    state.setdefault("last_proposal_status", None)
+    state.setdefault("last_proposal_reason", None)
     state.setdefault("last_action", None)
     return state
 
@@ -293,6 +379,80 @@ def is_risk_locked(state):
     daily_pnl = daily_realized_pnl(state)
     lock_amount = -float(state["initial_balance"]) * DAILY_LOSS_LOCK_PCT
     return daily_pnl <= lock_amount, daily_pnl, lock_amount
+
+
+def proposal_cooldown_remaining(state, now_ms=None):
+    last_ms = parse_utc_ms(state.get("last_proposal_at"))
+    if last_ms is None:
+        return 0
+    current_ms = now_ms if now_ms is not None else epoch_ms()
+    elapsed_seconds = max(0.0, (current_ms - last_ms) / 1000)
+    cooldown_seconds = state_settings(state)["proposal_cooldown_seconds"]
+    return max(0, int(math.ceil(cooldown_seconds - elapsed_seconds)))
+
+
+def record_proposal_attempt(state, result):
+    reason = result.get("reason")
+    if not reason and result.get("plan"):
+        reason = result["plan"].get("reason")
+    state["last_proposal_at"] = utc_now()
+    state["last_proposal_status"] = result.get("status")
+    state["last_proposal_reason"] = reason
+
+
+def proposal_control_summary(state):
+    locked, _, _ = is_risk_locked(state)
+    has_position = active_position(state) is not None
+    has_order = bool(active_entry_orders(state))
+    has_plan = bool(active_pending_plans(state))
+    cooldown_remaining = proposal_cooldown_remaining(state)
+    blockers = []
+    if locked:
+        blockers.append("risk_locked")
+    if state.get("trading_paused"):
+        blockers.append("paused")
+    if has_position:
+        blockers.append("position")
+    if has_order:
+        blockers.append("open_order")
+    if has_plan:
+        blockers.append("pending_plan")
+    if cooldown_remaining > 0:
+        blockers.append("cooldown")
+    return {
+        "can_propose": not blockers,
+        "blockers": blockers,
+        "cooldown_seconds": state_settings(state)["proposal_cooldown_seconds"],
+        "cooldown_remaining_seconds": cooldown_remaining,
+        "last_proposal_at": state.get("last_proposal_at"),
+        "last_proposal_status": state.get("last_proposal_status"),
+        "last_proposal_reason": state.get("last_proposal_reason"),
+    }
+
+
+def preflight_check(name, status, message, severity="info", details=None):
+    return {
+        "name": name,
+        "status": status,
+        "severity": severity,
+        "message": message,
+        "details": details or {},
+    }
+
+
+def summarize_preflight(checks):
+    if any(check["status"] == "fail" for check in checks):
+        return "fail"
+    if any(check["status"] == "warn" for check in checks):
+        return "warn"
+    return "pass"
+
+
+def validate_preflight_mode(mode):
+    normalized = str(mode or "tick").strip().lower()
+    if normalized not in {"tick", "scan"}:
+        raise PaperBotError("preflight mode must be tick or scan.")
+    return normalized
 
 
 def active_entry_orders(state):
@@ -774,6 +934,185 @@ def command_init(args):
     }
 
 
+def command_backups(args):
+    path = state_path_from_args(args)
+    backup_dir = path.parent / "backups"
+    return {
+        "ok": True,
+        "command": "backups",
+        "state_path": str(path),
+        "backup_dir": str(backup_dir),
+        "retention_count": BACKUP_RETENTION_COUNT,
+        "backups": backup_metadata(path),
+    }
+
+
+def command_settings(args):
+    path = state_path_from_args(args)
+    state = load_state(path)
+    updated = False
+    raw_cooldown = getattr(args, "proposal_cooldown_seconds", None)
+    if raw_cooldown is not None:
+        state_settings(state)["proposal_cooldown_seconds"] = validate_proposal_cooldown_seconds(raw_cooldown)
+        updated = True
+    if updated:
+        save_state(path, state)
+    return {
+        "ok": True,
+        "command": "settings",
+        "state_path": str(path),
+        "updated": updated,
+        "settings": state_settings(state),
+        "limits": {
+            "proposal_cooldown_seconds": {
+                "min": MIN_PROPOSE_COOLDOWN_SECONDS,
+                "max": MAX_PROPOSE_COOLDOWN_SECONDS,
+                "default": PROPOSE_COOLDOWN_SECONDS,
+            }
+        }
+    }
+
+
+def command_preflight(args):
+    mode = validate_preflight_mode(getattr(args, "mode", "tick"))
+    no_market = bool(getattr(args, "no_market", False))
+    path = state_path_from_args(args)
+    state = load_state(path)
+    checks = [
+        preflight_check(
+            "ledger",
+            "pass",
+            "paper 账本已初始化。",
+            details={"state_path": str(path), "mode": state.get("mode")},
+        ),
+        preflight_check(
+            "mode",
+            "pass",
+            f"自动运行模式为 {mode}。",
+            details={"mode": mode},
+        ),
+    ]
+
+    settings = state_settings(state)
+    checks.append(preflight_check(
+        "settings",
+        "pass",
+        "本地机器人设置在允许范围内。",
+        details={"settings": settings},
+    ))
+
+    if no_market:
+        checks.append(preflight_check("market", "skip", "已跳过行情源检查。"))
+    else:
+        try:
+            ticker = latest_mexc_ticker()
+            status = market_status(ticker)
+            if status == "live":
+                checks.append(preflight_check(
+                    "market",
+                    "pass",
+                    "行情源可用。",
+                    details={"price": ticker.get("price"), "age_seconds": market_age_seconds(ticker)},
+                ))
+            else:
+                checks.append(preflight_check(
+                    "market",
+                    "warn",
+                    "行情源可用但数据可能滞后。",
+                    severity="warning",
+                    details={"status": status, "age_seconds": market_age_seconds(ticker)},
+                ))
+        except PaperBotError as exc:
+            checks.append(preflight_check(
+                "market",
+                "fail",
+                f"行情源不可用：{exc}",
+                severity="error",
+            ))
+
+    locked, daily_pnl, lock_amount = is_risk_locked(state)
+    if locked and mode == "scan":
+        checks.append(preflight_check(
+            "risk_lock",
+            "fail",
+            "日内亏损达到风控线，scan 模式不得生成新草案。",
+            severity="error",
+            details={"daily_realized_pnl": daily_pnl, "lock_amount": lock_amount},
+        ))
+    elif locked:
+        checks.append(preflight_check(
+            "risk_lock",
+            "warn",
+            "日内亏损达到风控线，tick 只能继续管理已有模拟风险，不得生成新草案。",
+            severity="warning",
+            details={"daily_realized_pnl": daily_pnl, "lock_amount": lock_amount},
+        ))
+    else:
+        checks.append(preflight_check("risk_lock", "pass", "日内风控未锁定。"))
+
+    paused = bool(state.get("trading_paused"))
+    if paused and mode == "scan":
+        checks.append(preflight_check(
+            "manual_pause",
+            "fail",
+            "新草案已手动暂停，scan 模式不得生成新草案。",
+            severity="error",
+            details={"pause_reason": state.get("pause_reason")},
+        ))
+    elif paused:
+        checks.append(preflight_check(
+            "manual_pause",
+            "warn",
+            "新草案已手动暂停，tick 仍可管理已有模拟挂单和持仓。",
+            severity="warning",
+            details={"pause_reason": state.get("pause_reason")},
+        ))
+    else:
+        checks.append(preflight_check("manual_pause", "pass", "未手动暂停新草案。"))
+
+    active_orders = active_entry_orders(state)
+    pending_plans = active_pending_plans(state)
+    active_pos = active_position(state)
+    exposure_details = {
+        "has_position": active_pos is not None,
+        "open_entry_orders": len(active_orders),
+        "pending_plans": len(pending_plans),
+    }
+    if mode == "scan" and (active_pos or active_orders or pending_plans):
+        checks.append(preflight_check(
+            "exposure",
+            "warn",
+            "已有持仓、开放挂单或待确认草案，scan 会先 tick，但不会叠加新方向。",
+            severity="warning",
+            details=exposure_details,
+        ))
+    else:
+        checks.append(preflight_check("exposure", "pass", "无阻塞性模拟敞口。", details=exposure_details))
+
+    proposal_control = proposal_control_summary(state)
+    if mode == "scan" and proposal_control["cooldown_remaining_seconds"] > 0:
+        checks.append(preflight_check(
+            "proposal_cooldown",
+            "warn",
+            "草案生成处于冷却期，scan 会跳过重复行情分析。",
+            severity="warning",
+            details=proposal_control,
+        ))
+    else:
+        checks.append(preflight_check("proposal_cooldown", "pass", "草案冷却不阻止当前模式。", details=proposal_control))
+
+    overall = summarize_preflight(checks)
+    return {
+        "ok": True,
+        "command": "preflight",
+        "status": overall,
+        "can_start_auto": overall != "fail",
+        "mode": mode,
+        "state_path": str(path),
+        "checks": checks,
+    }
+
+
 def command_propose(args):
     symbol = normalize_symbol(args.symbol)
     if args.side != "short":
@@ -816,13 +1155,29 @@ def command_propose(args):
             "expired_items": expired_items
         }
 
+    force = bool(getattr(args, "force", False))
+    cooldown_remaining = 0 if force else proposal_cooldown_remaining(state)
+    if cooldown_remaining > 0:
+        if expired_items:
+            save_state(path, state)
+        return {
+            "ok": True,
+            "status": "cooldown",
+            "reason": "草案生成处于冷却期，避免重复请求行情分析和反复生成同类判断。",
+            "cooldown_seconds": PROPOSE_COOLDOWN_SECONDS,
+            "cooldown_remaining_seconds": cooldown_remaining,
+            "last_proposal_at": state.get("last_proposal_at"),
+            "last_proposal_status": state.get("last_proposal_status"),
+            "last_proposal_reason": state.get("last_proposal_reason"),
+            "expired_items": expired_items
+        }
+
     analysis = run_analyze(symbol)
     result = build_short_plan(state, analysis, args.risk_pct, args.leverage)
+    record_proposal_attempt(state, result)
     if result.get("status") == "placeable":
         upsert_pending_plan(state, result["plan"])
-        save_state(path, state)
-    elif expired_items:
-        save_state(path, state)
+    save_state(path, state)
     return result
 
 
@@ -1268,6 +1623,7 @@ def command_scan(args):
         side=getattr(args, "side", "short"),
         risk_pct=getattr(args, "risk_pct", STANDARD_RISK_PCT),
         leverage=getattr(args, "leverage", MAX_LEVERAGE),
+        force=getattr(args, "force", False),
         state_path=getattr(args, "state_path", None),
     )
     proposal_payload = command_propose(propose_args)
@@ -1315,6 +1671,7 @@ def status_payload(state, market=None, market_error=None, expired_items=None):
         "max_drawdown_pct": state.get("max_drawdown_pct", 0),
         "performance": performance_summary(state, unrealized),
         "risk_summary": risk_summary(state),
+        "proposal_control": proposal_control_summary(state),
         "risk_locked": is_risk_locked(state)[0],
         "trading_paused": bool(state.get("trading_paused")),
         "pause_reason": state.get("pause_reason"),
@@ -1368,11 +1725,27 @@ def build_parser():
     init_parser.add_argument("--state-path")
     init_parser.set_defaults(func=command_init)
 
+    backups_parser = subparsers.add_parser("backups")
+    backups_parser.add_argument("--state-path")
+    backups_parser.set_defaults(func=command_backups)
+
+    settings_parser = subparsers.add_parser("settings")
+    settings_parser.add_argument("--proposal-cooldown-seconds", type=int)
+    settings_parser.add_argument("--state-path")
+    settings_parser.set_defaults(func=command_settings)
+
+    preflight_parser = subparsers.add_parser("preflight")
+    preflight_parser.add_argument("--mode", default="tick", choices=["tick", "scan"])
+    preflight_parser.add_argument("--no-market", action="store_true")
+    preflight_parser.add_argument("--state-path")
+    preflight_parser.set_defaults(func=command_preflight)
+
     propose_parser = subparsers.add_parser("propose")
     propose_parser.add_argument("--symbol", required=True)
     propose_parser.add_argument("--side", required=True, choices=["short"])
     propose_parser.add_argument("--risk-pct", type=float, default=STANDARD_RISK_PCT)
     propose_parser.add_argument("--leverage", type=float, default=MAX_LEVERAGE)
+    propose_parser.add_argument("--force", action="store_true")
     propose_parser.add_argument("--state-path")
     propose_parser.set_defaults(func=command_propose)
 
@@ -1407,6 +1780,7 @@ def build_parser():
     scan_parser.add_argument("--side", default="short", choices=["short"])
     scan_parser.add_argument("--risk-pct", type=float, default=STANDARD_RISK_PCT)
     scan_parser.add_argument("--leverage", type=float, default=MAX_LEVERAGE)
+    scan_parser.add_argument("--force", action="store_true")
     scan_parser.add_argument("--state-path")
     scan_parser.set_defaults(func=command_scan)
 
@@ -1421,7 +1795,9 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     try:
-        payload = args.func(args)
+        path = state_path_from_args(args)
+        with state_file_lock(path):
+            payload = args.func(args)
     except PaperBotError as exc:
         error_exit(str(exc))
     json_print(payload)

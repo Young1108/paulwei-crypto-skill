@@ -27,6 +27,10 @@ DEFAULT_AUTO_TICK_INTERVAL_SECONDS = 60
 MIN_AUTO_TICK_INTERVAL_SECONDS = 5
 MAX_AUTO_TICK_INTERVAL_SECONDS = 3600
 AUTO_MODES = {"tick", "scan"}
+MAX_AUTO_CONSECUTIVE_ERRORS = 3
+MIN_AUTO_CONSECUTIVE_ERRORS = 1
+MAX_AUTO_CONSECUTIVE_ERRORS_LIMIT = 10
+PAPER_OPERATION_LOCK = threading.RLock()
 
 
 def json_bytes(payload):
@@ -35,7 +39,8 @@ def json_bytes(payload):
 
 def export_state_payload(state_path=None):
     path = Path(state_path).expanduser().resolve() if state_path else paper_bot.DEFAULT_STATE_PATH
-    state = paper_bot.load_state(path)
+    with paper_bot.state_file_lock(path):
+        state = paper_bot.load_state(path)
     return {
         "ok": True,
         "command": "export/state",
@@ -44,6 +49,19 @@ def export_state_payload(state_path=None):
         "generated_at": paper_bot.utc_now(),
         "ledger": state,
     }
+
+
+def backup_index_payload(state_path=None):
+    path = Path(state_path).expanduser().resolve() if state_path else paper_bot.DEFAULT_STATE_PATH
+    args = SimpleNamespace(state_path=str(path))
+    return paper_bot.command_backups(args)
+
+
+def run_paper_command(func, args):
+    path = paper_bot.state_path_from_args(args)
+    with PAPER_OPERATION_LOCK:
+        with paper_bot.state_file_lock(path):
+            return func(args)
 
 
 def validate_auto_interval(value):
@@ -67,6 +85,22 @@ def validate_auto_mode(value):
     if mode not in AUTO_MODES:
         raise paper_bot.PaperBotError("auto mode must be tick or scan.")
     return mode
+
+
+def validate_auto_max_consecutive_errors(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise paper_bot.PaperBotError("auto max consecutive errors must be an integer.") from exc
+    if count < MIN_AUTO_CONSECUTIVE_ERRORS:
+        raise paper_bot.PaperBotError(
+            f"auto max consecutive errors must be >= {MIN_AUTO_CONSECUTIVE_ERRORS}."
+        )
+    if count > MAX_AUTO_CONSECUTIVE_ERRORS_LIMIT:
+        raise paper_bot.PaperBotError(
+            f"auto max consecutive errors must be <= {MAX_AUTO_CONSECUTIVE_ERRORS_LIMIT}."
+        )
+    return count
 
 
 class AutoTickController:
@@ -94,6 +128,10 @@ class AutoTickController:
         self.last_result_status = None
         self.tick_count = 0
         self.error_count = 0
+        self.consecutive_error_count = 0
+        self.max_consecutive_errors = MAX_AUTO_CONSECUTIVE_ERRORS
+        self.halted_at = None
+        self.halt_reason = None
 
     def set_state_path(self, state_path):
         with self._lock:
@@ -116,6 +154,10 @@ class AutoTickController:
                 "last_result_status": self.last_result_status,
                 "tick_count": self.tick_count,
                 "error_count": self.error_count,
+                "consecutive_error_count": self.consecutive_error_count,
+                "max_consecutive_errors": self.max_consecutive_errors,
+                "halted_at": self.halted_at,
+                "halt_reason": self.halt_reason,
                 "state_path": self.state_path,
                 "mode": self.mode,
                 "scan_symbol": self.scan_symbol,
@@ -124,7 +166,16 @@ class AutoTickController:
                 "scan_leverage": self.scan_leverage,
             }
 
-    def start(self, interval_seconds=None, mode=None, scan_symbol=None, scan_side=None, scan_risk_pct=None, scan_leverage=None):
+    def start(
+        self,
+        interval_seconds=None,
+        mode=None,
+        scan_symbol=None,
+        scan_side=None,
+        scan_risk_pct=None,
+        scan_leverage=None,
+        max_consecutive_errors=None,
+    ):
         with self._lock:
             if self.is_running():
                 snapshot = self.snapshot()
@@ -146,10 +197,15 @@ class AutoTickController:
             if scan_leverage is not None:
                 paper_bot.validate_leverage(float(scan_leverage))
                 self.scan_leverage = float(scan_leverage)
+            if max_consecutive_errors is not None:
+                self.max_consecutive_errors = validate_auto_max_consecutive_errors(max_consecutive_errors)
             self._stop_event.clear()
             self.started_at = paper_bot.utc_now()
             self.stopped_at = None
             self.last_error = None
+            self.consecutive_error_count = 0
+            self.halted_at = None
+            self.halt_reason = None
             self._thread = threading.Thread(target=self._run_loop, name="paper-auto-tick", daemon=True)
             self._thread.start()
             snapshot = self.snapshot()
@@ -187,20 +243,32 @@ class AutoTickController:
                     risk_pct=self.scan_risk_pct,
                     leverage=self.scan_leverage,
                 )
-            payload = self.scan_func(args) if mode == "scan" else self.tick_func(args)
+            with PAPER_OPERATION_LOCK:
+                payload = self.scan_func(args) if mode == "scan" else self.tick_func(args)
         except Exception as exc:  # noqa: BLE001 - 自动循环必须记录错误并继续运行。
             with self._lock:
                 self.last_tick_at = tick_started_at
                 self.last_error_at = paper_bot.utc_now()
                 self.last_error = str(exc)
                 self.error_count += 1
-                self.last_result_status = "error"
+                self.consecutive_error_count += 1
+                if self.consecutive_error_count >= self.max_consecutive_errors:
+                    self.halted_at = paper_bot.utc_now()
+                    self.stopped_at = self.halted_at
+                    self.halt_reason = (
+                        f"连续 {self.consecutive_error_count} 次自动运行错误，已停止自动循环。"
+                    )
+                    self.last_result_status = "halted_error"
+                    self._stop_event.set()
+                else:
+                    self.last_result_status = "error"
             return {"ok": False, "error": str(exc)}
 
         with self._lock:
             self.last_tick_at = tick_started_at
             self.last_success_at = paper_bot.utc_now()
             self.last_error = None
+            self.consecutive_error_count = 0
             self.tick_count += 1
             self.last_result_status = (
                 payload.get("status")
@@ -296,6 +364,15 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
             except paper_bot.PaperBotError as exc:
                 self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
+        if parsed.path == "/api/backups":
+            self.send_json(backup_index_payload(self.state_path()))
+            return
+        if parsed.path == "/api/settings":
+            self.handle_api("settings", {})
+            return
+        if parsed.path == "/api/preflight":
+            self.handle_api("preflight", {})
+            return
         self.send_static(parsed.path)
 
     def do_POST(self):
@@ -318,7 +395,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                     balance=float(payload.get("balance", paper_bot.DEFAULT_BALANCE)),
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_init(args))
+                self.send_json(run_paper_command(paper_bot.command_init, args))
                 return
             if action == "propose":
                 args = SimpleNamespace(
@@ -326,30 +403,31 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                     side=str(payload.get("side", "short")),
                     risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
                     leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
+                    force=bool(payload.get("force", False)),
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_propose(args))
+                self.send_json(run_paper_command(paper_bot.command_propose, args))
                 return
             if action == "place":
                 plan_id = str(payload.get("plan_id", "")).strip()
                 if not plan_id:
                     raise paper_bot.PaperBotError("plan_id is required")
                 args = SimpleNamespace(plan_id=plan_id, state_path=self.state_path())
-                self.send_json(paper_bot.command_place(args))
+                self.send_json(run_paper_command(paper_bot.command_place, args))
                 return
             if action == "pause":
                 args = SimpleNamespace(
                     reason=str(payload.get("reason", "manual_pause")).strip() or "manual_pause",
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_pause(args))
+                self.send_json(run_paper_command(paper_bot.command_pause, args))
                 return
             if action == "resume":
                 args = SimpleNamespace(
                     reason=str(payload.get("reason", "manual_resume")).strip() or "manual_resume",
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_resume(args))
+                self.send_json(run_paper_command(paper_bot.command_resume, args))
                 return
             if action == "cancel":
                 args = SimpleNamespace(
@@ -358,11 +436,11 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                     order_id=str(payload.get("order_id", "")).strip() or None,
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_cancel(args))
+                self.send_json(run_paper_command(paper_bot.command_cancel, args))
                 return
             if action == "tick":
                 args = SimpleNamespace(state_path=self.state_path())
-                self.send_json(paper_bot.command_tick(args))
+                self.send_json(run_paper_command(paper_bot.command_tick, args))
                 return
             if action == "scan":
                 args = SimpleNamespace(
@@ -370,24 +448,56 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                     side=str(payload.get("side", "short")),
                     risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
                     leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
+                    force=bool(payload.get("force", False)),
                     state_path=self.state_path(),
                 )
-                self.send_json(paper_bot.command_scan(args))
+                self.send_json(run_paper_command(paper_bot.command_scan, args))
                 return
             if action == "status":
                 args = SimpleNamespace(state_path=self.state_path(), no_market=bool(payload.get("no_market", False)))
-                status_payload = paper_bot.command_status(args)
+                status_payload = run_paper_command(paper_bot.command_status, args)
                 status_payload["auto_tick"] = AUTO_TICK.snapshot()
                 self.send_json(status_payload)
+                return
+            if action == "backups":
+                self.send_json(backup_index_payload(self.state_path()))
+                return
+            if action == "settings":
+                args = SimpleNamespace(
+                    proposal_cooldown_seconds=payload.get("proposal_cooldown_seconds"),
+                    state_path=self.state_path(),
+                )
+                self.send_json(run_paper_command(paper_bot.command_settings, args))
+                return
+            if action == "preflight":
+                args = SimpleNamespace(
+                    mode=str(payload.get("mode", "tick")),
+                    no_market=bool(payload.get("no_market", False)),
+                    state_path=self.state_path(),
+                )
+                self.send_json(run_paper_command(paper_bot.command_preflight, args))
                 return
             if action == "auto/start":
                 interval = validate_auto_interval(
                     payload.get("interval_seconds", DEFAULT_AUTO_TICK_INTERVAL_SECONDS)
                 )
                 mode = validate_auto_mode(payload.get("mode", "tick"))
+                preflight_args = SimpleNamespace(
+                    mode=mode,
+                    no_market=bool(payload.get("no_market_preflight", False)),
+                    state_path=self.state_path(),
+                )
+                preflight_payload = run_paper_command(paper_bot.command_preflight, preflight_args)
+                if not preflight_payload.get("can_start_auto"):
+                    failed = [
+                        check["message"] for check in preflight_payload.get("checks", [])
+                        if check.get("status") == "fail"
+                    ]
+                    raise paper_bot.PaperBotError("auto preflight failed: " + " | ".join(failed))
                 self.send_json({
                     "ok": True,
                     "command": "auto/start",
+                    "preflight": preflight_payload,
                     "auto_tick": AUTO_TICK.start(
                         interval,
                         mode=mode,
@@ -395,6 +505,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                         scan_side=str(payload.get("side", "short")),
                         scan_risk_pct=float(payload.get("risk_pct", paper_bot.STANDARD_RISK_PCT)),
                         scan_leverage=float(payload.get("leverage", paper_bot.MAX_LEVERAGE)),
+                        max_consecutive_errors=payload.get("max_consecutive_errors"),
                     )
                 })
                 return

@@ -171,6 +171,18 @@ h2 {
   color: var(--amber);
 }
 
+.auto-run span.warning {
+  color: var(--amber);
+}
+
+.auto-run span.positive {
+  color: var(--green);
+}
+
+.auto-run span.negative {
+  color: var(--red);
+}
+
 .guard-controls {
   display: grid;
   grid-template-columns: minmax(130px, auto) minmax(86px, auto);
@@ -180,9 +192,56 @@ h2 {
 
 .auto-controls {
   display: grid;
-  grid-template-columns: 110px 120px minmax(150px, auto) minmax(86px, auto);
+  grid-template-columns: 110px 120px 120px minmax(120px, auto) minmax(150px, auto) minmax(86px, auto);
   gap: 10px;
   align-items: end;
+}
+
+.preflight-checks {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.preflight-check {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.preflight-check strong {
+  font-size: 12px;
+}
+
+.preflight-check span,
+.preflight-check small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.preflight-check small {
+  grid-column: 2;
+}
+
+.preflight-check.pass strong {
+  color: var(--green);
+}
+
+.preflight-check.warn strong {
+  color: var(--amber);
+}
+
+.preflight-check.fail strong {
+  color: var(--red);
 }
 
 .inline-field {
@@ -249,7 +308,7 @@ button:disabled {
 
 .settings {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   padding-top: 8px;
 }

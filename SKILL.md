@@ -365,6 +365,9 @@ Paul Wei 的核心原则：**仓位大小由风险承受能力倒推，而非由
 
 ```bash
 python3 scripts/paper_bot.py init --balance 500
+python3 scripts/paper_bot.py backups
+python3 scripts/paper_bot.py settings --proposal-cooldown-seconds 900
+python3 scripts/paper_bot.py preflight --mode scan
 python3 scripts/paper_bot.py propose --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py scan --symbol BTCUSDT --side short
 python3 scripts/paper_bot.py place --plan-id <PLAN_ID>
@@ -396,7 +399,7 @@ python3 scripts/paper_server.py --host 127.0.0.1 --port 8787 --state-path /priva
 5. 需要人工熔断时暂停新草案，恢复后再继续生成新计划。
 6. 持续手动刷新行情并模拟成交，或启动自动运行；自动运行支持 `Tick` 或 `Scan`，`Scan` 只生成待确认草案。
 
-界面显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、最近风控事件、绩效统计、权益曲线和最近交易历史，并每 15 秒自动刷新。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单离现价较远，说明策略在等待反弹到限价区，并不代表数据未更新。
+界面显示 BTC 实时价、24h 涨跌、行情延迟、上次 tick 状态、自动运行状态、挂单距现价、风险摘要、草案冷却、最近风控事件、绩效统计、权益曲线、最近交易历史和账本备份列表，并每 15 秒自动刷新。点击“导出账本”可下载完整 paper JSON 账本，用于复盘或审计。若挂单离现价较远，说明策略在等待反弹到限价区，并不代表数据未更新。
 
 ### 强制边界
 
@@ -404,18 +407,23 @@ python3 scripts/paper_server.py --host 127.0.0.1 --port 8787 --state-path /priva
 - 不读取、不保存、不打印私钥、助记词、交易所 API Key。
 - 不连接真实账户，不调用真实下单接口。
 - `init` 重置已有账本前必须自动备份旧 paper JSON，并默认只保留最近 20 个备份。
+- `backups` 和 `/api/backups` 只能列出同账本 `backups/` 目录的备份元数据，不得恢复、删除或修改账本。
 - `propose` 只生成订单草案；`place` 只把草案放入 paper 账本。
 - `scan` 只能执行 `tick -> propose`，不得确认挂单或真实下单。
 - `pause` 只暂停新草案生成，不得取消已有模拟挂单或干预已有持仓退出。
 - `resume` 只恢复新草案生成，不得自动生成或放置新订单。
 - `status` 必须返回 `risk_summary`，包含单笔风险、日亏损余量、日亏损上限和控制状态。
+- 行情分析型 `propose/scan` 默认必须遵守 15 分钟草案冷却；冷却时间只能通过本地账本 `settings` 在 60-3600 秒内调整；只有人工 CLI/API 调试可显式 `force` 绕过，自动运行不得绕过。
 - `cancel` 只取消待确认草案或开放模拟挂单，不影响真实账户。
 - `tick` 对同一根 1 分钟 K 线幂等，重复点击不得重复成交或重复止盈止损。
 - 新挂单不得使用创建所在 K 线的历史 high/low 触发乐观成交。
 - 草案和开放入场挂单过期后必须自动失效。
 - 自动 tick 只能在本地 paper server 进程内运行；服务关闭后必须停止。
+- 自动运行启动前必须执行 preflight，自检失败时不得启动自动循环。
 - 自动运行 `scan` 模式只能执行 `tick -> propose`，不得自动确认挂单。
 - 自动 tick 行情失败时只记录错误，不得用旧数据模拟交易。
+- 自动运行连续错误必须熔断停止，阈值默认 3 次且只能在 1-10 次范围内设置，不得在行情源或分析链路异常时无限循环。
+- CLI 和本地 Web server 必须使用同账本 `.lock` 文件串行化写入，降低同时操作同一 paper 账本时的数据覆盖风险。
 - 每次有效 tick 必须记录权益快照；`status` 必须返回最近权益快照、最近已平仓交易和绩效统计。
 - `/api/export/state` 只能导出本地 paper 账本 JSON，不得包含真实账户凭据。
 - `paper_server.py --state-path` 必须让自动 tick 和全部 API 使用同一个隔离账本路径。

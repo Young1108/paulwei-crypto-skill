@@ -410,3 +410,221 @@
 
 - 保留数量仍是代码常量，暂未暴露为 CLI 配置。
 - 暂无前端备份管理和恢复能力。
+
+---
+
+# BTC Paper 备份只读列表审查
+
+- 生成时间：2026-05-31 21:05（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，补齐自动备份的只读审计入口，未扩大真实交易能力
+- 综合评分：94/100
+
+## 已完成
+
+1. 新增 `backups` CLI 子命令，返回备份目录、保留上限和备份元数据。
+2. 新增 `GET /api/backups` 与 `POST /api/backups`，供本地 Web 控制台读取。
+3. 前端新增“账本备份”面板和“刷新备份”按钮，初始化后自动刷新备份列表。
+4. 文档明确备份列表只读，不恢复、不删除、不修改账本。
+5. 测试覆盖 CLI 元数据排序与 server payload。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：29 个测试通过。
+- 隔离账本临时服务连续两次 `/api/init` 后，`/api/backups` 返回 1 个备份和 `retention_count=20`。
+- Headless Playwright 确认“账本备份”面板、“刷新备份”按钮和备份数量可见。
+
+## 剩余风险
+
+- 备份列表目前只读，不提供恢复能力；后续如实现恢复，需要加入人工确认、覆盖前再次备份和测试夹具。
+- 保留数量仍是代码常量，暂未暴露为配置。
+
+---
+
+# BTC Paper 草案冷却控制审查
+
+- 生成时间：2026-05-31 22:46（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，增强机器人运行控制，未扩大真实交易能力
+- 综合评分：94/100
+
+## 已完成
+
+1. 新增 15 分钟草案生成冷却，减少自动 scan 和频繁手动 propose 对行情分析接口的重复请求。
+2. 账本记录最近草案时间、状态和原因，`status` 返回 `proposal_control`。
+3. `propose/scan` 默认遵守冷却；CLI/API 可显式 `force` 人工绕过，自动运行不绕过。
+4. 前端风险面板展示“草案冷却”和“最近草案”，下一步提示会显示冷却等待。
+5. 测试覆盖 cooldown blocker、重复 propose 不调用行情分析、`--force` 绕过。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：31 个测试通过。
+- 隔离账本临时服务 `POST /api/status` 返回 `proposal_control.cooldown_seconds=900` 和 `can_propose=true`。
+- Headless Playwright 确认“草案冷却”指标、备份面板和 paper-only 提示可见。
+
+## 剩余风险
+
+- 冷却时间仍是代码常量，暂未暴露为可配置参数。
+- 前端不提供 force 按钮，人工绕过需通过 CLI/API。
+
+---
+
+# BTC Paper 自动运行错误熔断审查
+
+- 生成时间：2026-05-31 23:17（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`web/`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，增强自动运行故障控制，未扩大真实交易能力
+- 综合评分：94/100
+
+## 已完成
+
+1. 自动运行连续 3 次错误后进入熔断状态并停止自动循环。
+2. `AutoTickController.snapshot()` 暴露连续错误计数、阈值、熔断时间和熔断原因。
+3. 成功 tick 会重置连续错误计数；重新 start 会清理熔断状态。
+4. 前端自动运行状态显示连续错误计数，熔断后显示“已熔断”和原因。
+5. 测试覆盖连续错误熔断与成功后计数重置。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：33 个测试通过。
+- 隔离账本临时服务 `POST /api/auto/status` 返回 `consecutive_error_count=0`、`max_consecutive_errors=3`、`halted_at=null`。
+- Headless Playwright 确认自动状态显示“连续错误 0/3”、草案冷却、备份面板和 paper-only 提示。
+
+## 剩余风险
+
+- 熔断阈值仍是代码常量，暂未暴露为配置。
+- 前端没有单独的熔断重置按钮，当前通过重新启动自动运行清理熔断状态。
+
+---
+
+# BTC Paper 安全范围配置化审查
+
+- 生成时间：2026-06-01 00:24（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，提升机器人运行参数可控性，未扩大真实交易能力
+- 综合评分：94/100
+
+## 已完成
+
+1. 本地 paper 账本新增 `settings.proposal_cooldown_seconds`，默认 900 秒，允许 60-3600 秒。
+2. 新增 `settings` CLI 子命令和 `GET/POST /api/settings`。
+3. 自动运行启动支持 `max_consecutive_errors`，默认 3 次，允许 1-10 次。
+4. 前端高级设置可调整草案冷却秒数，自动运行区可设置错误阈值。
+5. server 内新增 `PAPER_OPERATION_LOCK`，串行化同进程内的 paper 账本命令，降低自动 tick 与 HTTP 设置更新的并发覆盖风险。
+6. 测试覆盖设置更新、范围校验、自动错误阈值配置。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：36 个测试通过。
+- 隔离账本临时服务验证 `proposal_cooldown_seconds=120` 和 `max_consecutive_errors=5` 生效。
+- Headless Playwright 确认冷却输入为 `120`、错误阈值输入为 `5`、保存设置按钮和 paper-only 提示可见。
+
+## 剩余风险
+
+- `PAPER_OPERATION_LOCK` 只覆盖同一个 server 进程；CLI 与 server 同时写同一账本仍可能竞争。
+- 仍未提供完整机器人配置文件，当前配置范围仅覆盖冷却和自动错误阈值。
+
+---
+
+# BTC Paper 跨进程文件锁审查
+
+- 生成时间：2026-06-01 10:09（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`tests/test_paper_bot.py`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，提升 CLI 与 Web server 同账本操作的一致性
+- 综合评分：95/100
+
+## 已完成
+
+1. 新增 `state_file_lock()`，使用同账本 sidecar `.lock` 文件进行跨进程互斥。
+2. CLI `main()` 执行任何子命令前获取同一账本文件锁。
+3. Web server 的 `run_paper_command()` 同时持有进程内锁与文件锁。
+4. `export_state_payload()` 读取账本时也获取文件锁。
+5. 测试覆盖锁文件创建、CLI 命令生成锁文件、server 命令在锁内执行。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：38 个测试通过。
+- 隔离账本临时服务执行 `POST /api/init` 与 `POST /api/settings` 后，sidecar `.lock` 文件存在。
+- Headless Playwright 确认页面仍能读取设置并正常加载。
+
+## 剩余风险
+
+- 文件锁使用 `fcntl.flock`，适用于当前 Unix/macOS 环境，未实现 Windows 兼容。
+- 锁覆盖整个命令执行期，行情请求较慢时其他同账本操作会等待。
+
+---
+
+# BTC Paper 自动运行前自检审查
+
+- 生成时间：2026-06-01 10:25（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/`、`tests/test_paper_bot.py`、`README.md`、`SKILL.md`
+- 结论：通过，自动运行具备启动门禁，未扩大真实交易能力
+- 综合评分：94/100
+
+## 已完成
+
+1. 新增 `preflight` CLI 子命令，输出结构化 checks、整体状态和 `can_start_auto`。
+2. 新增 `GET/POST /api/preflight`。
+3. `/api/auto/start` 启动前执行 preflight，自检失败时拒绝启动自动循环。
+4. 检查项覆盖账本、模式、设置、行情源、日损锁定、手动暂停、模拟敞口和草案冷却。
+5. 前端新增“运行前自检”按钮和自检状态文本。
+6. 测试覆盖通过、警告和失败三类自检结果。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：41 个测试通过。
+- 隔离账本临时服务 `POST /api/preflight` 使用 `mode=scan,no_market=true` 返回 `status=pass`、`can_start_auto=true`。
+- Headless Playwright 确认“运行前自检”按钮、自检状态文本、自动运行状态和 paper-only 提示可见。
+
+## 剩余风险
+
+- UI 自检默认检查真实行情源；网络异常会阻止自动启动，这是门禁设计但会增加等待时间。
+- preflight 只给出原因，不提供一键修复动作。
+
+---
+
+# BTC Paper 自检结果可读化审查
+
+- 生成时间：2026-06-01 10:49（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`web/index.html`、`web/app.js`、`web/styles.css`、`scripts/paper_bot.py`、`scripts/paper_server.py`
+- 结论：通过，提升自动运行门禁的可解释性，未扩大真实交易能力
+- 综合评分：95/100
+
+## 已完成
+
+1. 前端自检区域新增检查项明细列表。
+2. 每个检查项按 `pass/warn/fail/skip` 展示名称、状态和原因。
+3. 保留原有整体自检状态文本，便于快速判断自动运行能否启动。
+4. paper-only 边界未变化，不接收、不保存、不打印真实账户凭据。
+
+## 验证记录
+
+- 临时服务端口 `8788` 无监听进程，确认测试服务已停止。
+- Headless Playwright 使用样例自检 payload 验证渲染 3 条明细，并确认 warning 与 failure 样式可见。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：41 个测试通过。
+- `git diff --check`：通过。
+
+## 剩余风险
+
+- 自检明细只解释失败原因，暂未提供一键修复动作。
+- 真实行情源异常时仍会阻止自动启动，这是当前风控门禁的预期行为。

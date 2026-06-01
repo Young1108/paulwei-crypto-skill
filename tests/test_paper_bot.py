@@ -31,6 +31,12 @@ FIXTURE_ANALYSIS = {
     "funding": {"avg_8period_pct": 0.001},
 }
 
+WAIT_ANALYSIS = json.loads(json.dumps(FIXTURE_ANALYSIS))
+WAIT_ANALYSIS["structure_4h"]["trend"] = "震荡"
+WAIT_ANALYSIS["ma"]["ma7"] = 75000.0
+WAIT_ANALYSIS["ma"]["ma14"] = 74000.0
+WAIT_ANALYSIS["levels"]["support"] = [73000.0, 72000.0]
+
 
 class PaperBotUnitTest(unittest.TestCase):
     def test_symbol_validation_rejects_query_pollution(self):
@@ -174,6 +180,30 @@ class PaperBotUnitTest(unittest.TestCase):
         self.assertIsNone(state["pause_reason"])
         self.assertEqual(resume_event["event_type"], "manual_resume")
 
+    def test_proposal_control_reports_cooldown_blocker(self):
+        state = paper_bot.initial_state(500)
+        state["last_proposal_at"] = paper_bot.utc_now()
+        state["last_proposal_status"] = "wait"
+        summary = paper_bot.proposal_control_summary(state)
+        self.assertFalse(summary["can_propose"])
+        self.assertIn("cooldown", summary["blockers"])
+        self.assertGreater(summary["cooldown_remaining_seconds"], 0)
+
+    def test_proposal_cooldown_validation_rejects_out_of_range(self):
+        with self.assertRaises(paper_bot.PaperBotError):
+            paper_bot.validate_proposal_cooldown_seconds(59)
+        with self.assertRaises(paper_bot.PaperBotError):
+            paper_bot.validate_proposal_cooldown_seconds(3601)
+        self.assertEqual(paper_bot.validate_proposal_cooldown_seconds(120), 120)
+
+    def test_state_file_lock_creates_sidecar_lock_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            lock_path = paper_bot.state_lock_path(state_path)
+            with paper_bot.state_file_lock(state_path) as active_lock:
+                self.assertEqual(active_lock, lock_path)
+                self.assertTrue(lock_path.exists())
+
 
 class PaperBotCliTest(unittest.TestCase):
     def test_init_backs_up_existing_state_before_reset(self):
@@ -189,6 +219,7 @@ class PaperBotCliTest(unittest.TestCase):
             current_state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(backup_state["initial_balance"], 500.0)
             self.assertEqual(current_state["initial_balance"], 600.0)
+            self.assertTrue(paper_bot.state_lock_path(state_path).exists())
 
     def test_backup_pruning_keeps_recent_state_backups(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -209,6 +240,101 @@ class PaperBotCliTest(unittest.TestCase):
             self.assertNotIn("paper_state.20260101_000000.00000000.json", remaining_names)
             self.assertNotIn("paper_state.20260101_000001.00000001.json", remaining_names)
             self.assertIn("paper_state.20260101_000021.00000021.json", remaining_names)
+
+    def test_backups_command_lists_metadata_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            backup_dir = Path(tmpdir) / "backups"
+            backup_dir.mkdir()
+            first_backup = backup_dir / "paper_state.20260101_000000.aaaaaaaa.json"
+            second_backup = backup_dir / "paper_state.20260101_000100.bbbbbbbb.json"
+            first_backup.write_text(json.dumps({"initial_balance": 500}), encoding="utf-8")
+            second_backup.write_text(json.dumps({"initial_balance": 600}), encoding="utf-8")
+            os.utime(first_backup, (100, 100))
+            os.utime(second_backup, (200, 200))
+
+            payload = self.run_cli(["backups", "--state-path", str(state_path)], os.environ.copy())
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "backups")
+            self.assertEqual(payload["retention_count"], paper_bot.BACKUP_RETENTION_COUNT)
+            self.assertEqual([item["name"] for item in payload["backups"]], [
+                second_backup.name,
+                first_backup.name,
+            ])
+            self.assertEqual(payload["backups"][0]["size_bytes"], second_backup.stat().st_size)
+            self.assertIn("modified_at", payload["backups"][0])
+
+    def test_settings_command_updates_proposal_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+
+            before = self.run_cli(["settings", "--state-path", str(state_path)], env)
+            self.assertEqual(before["settings"]["proposal_cooldown_seconds"], 900)
+
+            updated = self.run_cli([
+                "settings", "--proposal-cooldown-seconds", "120", "--state-path", str(state_path)
+            ], env)
+            self.assertTrue(updated["updated"])
+            self.assertEqual(updated["settings"]["proposal_cooldown_seconds"], 120)
+
+            status = self.run_cli(["status", "--no-market", "--state-path", str(state_path)], env)
+            self.assertEqual(status["proposal_control"]["cooldown_seconds"], 120)
+
+    def test_preflight_passes_for_initialized_state_without_market(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+
+            payload = self.run_cli([
+                "preflight", "--mode", "tick", "--no-market", "--state-path", str(state_path)
+            ], env)
+
+            self.assertEqual(payload["status"], "pass")
+            self.assertTrue(payload["can_start_auto"])
+            self.assertEqual(payload["mode"], "tick")
+
+    def test_preflight_warns_when_scan_is_in_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["last_proposal_at"] = paper_bot.utc_now()
+            state["last_proposal_status"] = "wait"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            payload = self.run_cli([
+                "preflight", "--mode", "scan", "--no-market", "--state-path", str(state_path)
+            ], env)
+
+            self.assertEqual(payload["status"], "warn")
+            self.assertTrue(payload["can_start_auto"])
+            self.assertIn("proposal_cooldown", [check["name"] for check in payload["checks"]])
+
+    def test_preflight_fails_for_scan_when_risk_locked(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            env = os.environ.copy()
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["closed_trades"].append({
+                "closed_at": paper_bot.today_utc() + "T00:00:00Z",
+                "realized_pnl": -10.01,
+            })
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            payload = self.run_cli([
+                "preflight", "--mode", "scan", "--no-market", "--state-path", str(state_path)
+            ], env)
+
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["can_start_auto"])
+            failed_names = [check["name"] for check in payload["checks"] if check["status"] == "fail"]
+            self.assertIn("risk_lock", failed_names)
 
     def test_init_propose_place_tick_status_flow_with_fixtures(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -339,6 +465,37 @@ class PaperBotCliTest(unittest.TestCase):
             self.assertEqual(scan["proposal"]["status"], "placeable")
             stored = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(len([p for p in stored["pending_plans"] if p["status"] == "pending"]), 1)
+
+    def test_propose_cooldown_skips_repeated_analysis_without_force(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            state_path = tmp / "paper_state.json"
+            analysis_path = tmp / "wait_analysis.json"
+            analysis_path.write_text(json.dumps(WAIT_ANALYSIS), encoding="utf-8")
+            env = os.environ.copy()
+            env["PAPER_BOT_ANALYSIS_FIXTURE"] = str(analysis_path)
+
+            self.run_cli(["init", "--balance", "500", "--state-path", str(state_path)], env)
+            first = self.run_cli([
+                "propose", "--symbol", "BTCUSDT", "--side", "short", "--state-path", str(state_path)
+            ], env)
+            self.assertEqual(first["status"], "wait")
+
+            blocked_env = os.environ.copy()
+            blocked_env["PAPER_BOT_ANALYSIS_FIXTURE"] = str(tmp / "missing_analysis.json")
+            second = self.run_cli([
+                "propose", "--symbol", "BTCUSDT", "--side", "short", "--state-path", str(state_path)
+            ], blocked_env)
+            self.assertEqual(second["status"], "cooldown")
+            self.assertGreater(second["cooldown_remaining_seconds"], 0)
+
+            status = self.run_cli(["status", "--no-market", "--state-path", str(state_path)], env)
+            self.assertIn("cooldown", status["proposal_control"]["blockers"])
+
+            forced = self.run_cli([
+                "propose", "--symbol", "BTCUSDT", "--side", "short", "--force", "--state-path", str(state_path)
+            ], env)
+            self.assertEqual(forced["status"], "wait")
 
     def test_pause_blocks_propose_before_market_calls(self):
         with tempfile.TemporaryDirectory() as tmpdir:

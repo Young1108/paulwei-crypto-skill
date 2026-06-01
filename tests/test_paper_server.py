@@ -57,6 +57,36 @@ class AutoTickControllerTest(unittest.TestCase):
         self.assertEqual(snapshot["last_result_status"], "error")
         self.assertIn("fixture failure", snapshot["last_error"])
 
+    def test_auto_tick_controller_halts_after_consecutive_errors(self):
+        def bad_tick(_args):
+            raise RuntimeError("fixture failure")
+
+        controller = paper_server.AutoTickController(tick_func=bad_tick, default_interval=0.01)
+        result = None
+        for _ in range(paper_server.MAX_AUTO_CONSECUTIVE_ERRORS):
+            result = controller.tick_once()
+        snapshot = controller.snapshot()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(snapshot["consecutive_error_count"], paper_server.MAX_AUTO_CONSECUTIVE_ERRORS)
+        self.assertEqual(snapshot["last_result_status"], "halted_error")
+        self.assertIsNotNone(snapshot["halted_at"])
+        self.assertIn("连续", snapshot["halt_reason"])
+
+    def test_auto_tick_controller_success_resets_consecutive_errors(self):
+        def bad_tick(_args):
+            raise RuntimeError("fixture failure")
+
+        controller = paper_server.AutoTickController(tick_func=bad_tick, default_interval=0.01)
+        controller.tick_once()
+        controller.tick_func = lambda _args: {"ok": True, "status": "processed"}
+        result = controller.tick_once()
+        snapshot = controller.snapshot()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(snapshot["consecutive_error_count"], 0)
+        self.assertEqual(snapshot["last_result_status"], "processed")
+
     def test_auto_tick_controller_passes_configured_state_path(self):
         seen = {}
 
@@ -95,6 +125,7 @@ class AutoTickControllerTest(unittest.TestCase):
             scan_side="short",
             scan_risk_pct=0.0025,
             scan_leverage=2,
+            max_consecutive_errors=5,
         )
         try:
             result = controller.tick_once()
@@ -107,6 +138,7 @@ class AutoTickControllerTest(unittest.TestCase):
         self.assertEqual(seen["leverage"], 2.0)
         self.assertEqual(snapshot["mode"], "scan")
         self.assertEqual(snapshot["last_result_status"], "placeable")
+        self.assertEqual(snapshot["max_consecutive_errors"], 5)
 
     def test_api_interval_validation(self):
         with self.assertRaises(paper_server.paper_bot.PaperBotError):
@@ -117,6 +149,31 @@ class AutoTickControllerTest(unittest.TestCase):
         self.assertEqual(paper_server.validate_auto_mode("scan"), "scan")
         with self.assertRaises(paper_server.paper_bot.PaperBotError):
             paper_server.validate_auto_mode("place")
+
+    def test_auto_max_consecutive_errors_validation(self):
+        self.assertEqual(paper_server.validate_auto_max_consecutive_errors(3), 3)
+        with self.assertRaises(paper_server.paper_bot.PaperBotError):
+            paper_server.validate_auto_max_consecutive_errors(0)
+        with self.assertRaises(paper_server.paper_bot.PaperBotError):
+            paper_server.validate_auto_max_consecutive_errors(11)
+
+    def test_run_paper_command_uses_state_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            seen = {}
+
+            def fake_command(args):
+                lock_path = paper_server.paper_bot.state_lock_path(Path(args.state_path))
+                seen["lock_exists"] = lock_path.exists()
+                return {"ok": True}
+
+            result = paper_server.run_paper_command(
+                fake_command,
+                paper_server.SimpleNamespace(state_path=str(state_path)),
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(seen["lock_exists"])
 
     def test_export_state_payload_contains_paper_only_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -139,6 +196,21 @@ class AutoTickControllerTest(unittest.TestCase):
             state_path = Path(tmpdir) / "missing_state.json"
             with self.assertRaises(paper_server.paper_bot.PaperBotError):
                 paper_server.export_state_payload(state_path)
+
+    def test_backup_index_payload_lists_existing_backups(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "paper_state.json"
+            backup_dir = Path(tmpdir) / "backups"
+            backup_dir.mkdir()
+            backup_path = backup_dir / "paper_state.20260101_000000.aaaaaaaa.json"
+            backup_path.write_text("{}", encoding="utf-8")
+
+            payload = paper_server.backup_index_payload(state_path)
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["command"], "backups")
+            self.assertEqual(payload["backups"][0]["name"], backup_path.name)
+            self.assertEqual(Path(payload["backup_dir"]), backup_dir.resolve())
 
 
 if __name__ == "__main__":

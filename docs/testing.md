@@ -126,3 +126,114 @@
 - `git diff --check`：通过。
 - `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：27 个测试通过。
 - 静态敏感词扫描：未发现真实 API Key、私钥、助记词或交易凭据。
+
+---
+
+- 日期：2026-05-31 21:05（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 账本备份只读列表
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：29 个测试通过。
+- 单测验证：`backups` CLI 按最新优先返回备份元数据；server 备份索引 payload 返回 `command=backups`。
+- 隔离账本临时服务连续执行两次 `POST /api/init` 后，`GET /api/backups` 返回 1 个备份、`retention_count=20`。
+- Headless Playwright 打开隔离账本服务页面，确认“账本备份”面板、“刷新备份”按钮、备份数量和 paper-only 提示可见。
+
+---
+
+- 日期：2026-05-31 22:46（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 草案生成冷却控制
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：31 个测试通过。
+- 单测验证：重复 `propose` 在冷却期直接返回 `status=cooldown`，不会调用行情分析；`--force` 可人工绕过。
+- 隔离账本临时服务 `POST /api/status` 返回 `proposal_control.cooldown_seconds=900` 和 `can_propose=true`。
+- Headless Playwright 打开隔离账本服务页面，确认“草案冷却”指标、备份面板和 paper-only 提示可见。
+
+---
+
+- 日期：2026-05-31 23:17（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 自动运行连续错误熔断
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：33 个测试通过。
+- 单测验证：自动运行连续 3 次错误后进入 `halted_error`；成功 tick 会重置连续错误计数。
+- 隔离账本临时服务 `POST /api/auto/status` 返回 `consecutive_error_count=0`、`max_consecutive_errors=3`、`halted_at=null`。
+- Headless Playwright 打开隔离账本服务页面，确认自动状态显示“连续错误 0/3”、草案冷却、备份面板和 paper-only 提示。
+
+---
+
+- 日期：2026-06-01 00:24（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 机器人安全范围配置化
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：36 个测试通过。
+- 单测验证：草案冷却设置可更新到 120 秒；冷却范围 60-3600 秒；自动连续错误阈值范围 1-10 次。
+- 隔离账本临时服务 `POST /api/settings` 将 `proposal_cooldown_seconds` 更新为 120。
+- 隔离账本临时服务 `POST /api/auto/start` 使用 `max_consecutive_errors=5` 启动成功。
+- 隔离账本临时服务 `POST /api/status` 返回 `proposal_control.cooldown_seconds=120` 和 `auto_tick.max_consecutive_errors=5`。
+- Headless Playwright 打开隔离账本服务页面，确认冷却输入为 `120`、错误阈值输入为 `5`、保存设置按钮和 paper-only 提示可见。
+
+---
+
+- 日期：2026-06-01 10:09（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 跨进程账本文件锁
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：38 个测试通过。
+- 单测验证：`state_file_lock()` 创建 sidecar lock 文件；CLI `init` 后锁文件存在；server `run_paper_command()` 在锁内执行。
+- 隔离账本临时服务执行 `POST /api/init` 与 `POST /api/settings` 后，`/private/tmp/paulwei-lock-view.json.lock` 存在。
+- Headless Playwright 打开隔离账本服务页面，确认冷却输入为 `180`、保存设置按钮和 paper-only 提示可见。
+
+---
+
+- 日期：2026-06-01 10:25（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 自动运行前自检
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `git diff --check`：通过。
+- `python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：41 个测试通过。
+- 单测验证：初始化账本自检通过；scan 冷却期返回 warning；scan 在日损锁定时返回 fail。
+- 隔离账本临时服务 `POST /api/preflight` 使用 `mode=scan,no_market=true` 返回 `status=pass`、`can_start_auto=true`。
+- Headless Playwright 打开隔离账本服务页面，确认“运行前自检”按钮、自检状态文本、自动运行状态和 paper-only 提示可见。
+
+---
+
+- 日期：2026-06-01 10:49（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 自检结果明细列表与提交前验证
+
+## 结果
+
+- 临时服务端口 `8788`：无监听进程。
+- Headless Playwright 使用隔离账本页面注入自检样例 payload，确认：
+  - 自检状态文本显示 `自检有警告 · 失败 1 · 警告 1`。
+  - 页面渲染 3 条 `.preflight-check` 明细。
+  - `.warn` 与 `.fail` 状态样式可见。
+  - paper-only 提示仍可见。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：41 个测试通过。
+- `git diff --check`：通过。
+- 敏感赋值形态扫描：无命中。

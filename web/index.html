@@ -53,6 +53,7 @@
           <div>
             <strong>自动运行</strong>
             <span id="autoStatusText">未启动</span>
+            <span id="preflightStatusText">自检未运行</span>
           </div>
           <div class="auto-controls">
             <label class="inline-field">
@@ -66,9 +67,15 @@
               <span>间隔</span>
               <input id="autoIntervalInput" type="number" value="60" min="5" max="3600" step="5">
             </label>
+            <label class="inline-field">
+              <span>错误阈值</span>
+              <input id="autoMaxErrorInput" type="number" value="3" min="1" max="10" step="1">
+            </label>
+            <button id="preflightBtn" class="ghost">运行前自检</button>
             <button id="autoStartBtn">启动自动 tick</button>
             <button id="autoStopBtn" class="ghost">停止</button>
           </div>
+          <div id="preflightChecksView" class="preflight-checks empty">尚未运行自检</div>
         </div>
 
         <details class="advanced">
@@ -94,6 +101,14 @@
                 <option value="1">1x</option>
               </select>
             </label>
+            <label class="field">
+              <span>草案冷却秒</span>
+              <input id="proposalCooldownInput" type="number" value="900" min="60" max="3600" step="60">
+            </label>
+            <div class="field">
+              <span id="settingsStatusText">设置未保存</span>
+              <button id="saveSettingsBtn" class="ghost">保存设置</button>
+            </div>
           </div>
         </details>
       </section>
@@ -154,6 +169,14 @@
           <article class="mini-metric">
             <span>控制状态</span>
             <strong id="controlStateValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>草案冷却</span>
+            <strong id="proposalCooldownValue">--</strong>
+          </article>
+          <article class="mini-metric">
+            <span>最近草案</span>
+            <strong id="lastProposalValue">--</strong>
           </article>
         </div>
         <div id="riskEventsView" class="empty">暂无风控事件</div>
@@ -227,6 +250,17 @@
             <div id="equitySnapshotsView" class="empty">暂无 tick 快照</div>
           </div>
         </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>账本备份</h2>
+          <div class="section-actions">
+            <span id="backupCountBadge">0</span>
+            <button id="backupRefreshBtn" class="ghost">刷新备份</button>
+          </div>
+        </div>
+        <div id="backupsView" class="empty">暂无账本备份</div>
       </section>
 
       <details class="panel log-panel">
