@@ -27,6 +27,7 @@ const els = {
   autoIntervalInput: document.querySelector("#autoIntervalInput"),
   autoMaxErrorInput: document.querySelector("#autoMaxErrorInput"),
   autoStatusText: document.querySelector("#autoStatusText"),
+  autoResetBtn: document.querySelector("#autoResetBtn"),
   refreshBtn: document.querySelector("#refreshBtn"),
   exportStateBtn: document.querySelector("#exportStateBtn"),
   backupRefreshBtn: document.querySelector("#backupRefreshBtn"),
@@ -74,6 +75,16 @@ function fmt(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
 function log(label, payload) {
   const time = new Date().toLocaleTimeString();
   els.logView.textContent = `[${time}] ${label}\n${JSON.stringify(payload, null, 2)}\n\n` + els.logView.textContent;
@@ -112,6 +123,7 @@ function setBusy(busy) {
     els.preflightBtn,
     els.autoStartBtn,
     els.autoStopBtn,
+    els.autoResetBtn,
     els.saveSettingsBtn,
     els.refreshBtn,
     els.exportStateBtn,
@@ -218,12 +230,16 @@ function renderPreflightChecks(checks) {
   els.preflightChecksView.innerHTML = checks.length
     ? checks.map((check) => {
         const details = Object.keys(check.details || {}).length
-          ? `<small>${JSON.stringify(check.details)}</small>`
+          ? `<small class="details">${escapeHtml(JSON.stringify(check.details))}</small>`
+          : "";
+        const remediation = check.remediation
+          ? `<small class="remediation">处理建议：${escapeHtml(check.remediation)}</small>`
           : "";
         return `
-          <article class="preflight-check ${check.status || "skip"}">
-            <strong>${labelMap[check.status] || check.status || "--"}</strong>
-            <span>${check.name || "--"} · ${check.message || "--"}</span>
+          <article class="preflight-check ${escapeHtml(check.status || "skip")}">
+            <strong>${escapeHtml(labelMap[check.status] || check.status || "--")}</strong>
+            <span>${escapeHtml(check.name || "--")} · ${escapeHtml(check.message || "--")}</span>
+            ${remediation}
             ${details}
           </article>
         `;
@@ -658,6 +674,12 @@ els.autoStopBtn.addEventListener("click", async () => {
   const payload = await api("/api/auto/stop", {});
   log("停止自动运行", payload);
   await refreshStatus("自动运行状态");
+});
+
+els.autoResetBtn.addEventListener("click", async () => {
+  const payload = await api("/api/auto/reset", {});
+  log("重置自动熔断", payload);
+  await refreshStatus("重置后状态");
 });
 
 els.saveSettingsBtn.addEventListener("click", async () => {

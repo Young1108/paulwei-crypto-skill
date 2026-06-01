@@ -228,6 +228,22 @@
 ## 结果
 
 - 临时服务端口 `8788`：无监听进程。
+
+---
+
+- 日期：2026-06-01 11:10（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 自动运行熔断重置
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：43 个测试通过。
+- `git diff --check`：通过。
+- 单测验证：连续错误熔断后 `reset_halt()` 清除 `halted_at`、`halt_reason`、`last_error` 和 `consecutive_error_count`，并保留累计 `error_count`。
+- 隔离账本临时服务 `POST /api/auto/reset` 返回合法 JSON，`command=auto/reset`、`running=false`、`last_result_status=reset`。
+- Headless Playwright 打开隔离账本服务页面，确认“重置熔断”按钮可见，paper-only 提示仍可见。
+- 临时服务端口 `8788`：无监听进程。
 - Headless Playwright 使用隔离账本页面注入自检样例 payload，确认：
   - 自检状态文本显示 `自检有警告 · 失败 1 · 警告 1`。
   - 页面渲染 3 条 `.preflight-check` 明细。
@@ -237,3 +253,22 @@
 - `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：41 个测试通过。
 - `git diff --check`：通过。
 - 敏感赋值形态扫描：无命中。
+
+---
+
+- 日期：2026-06-01 10:58（中国时区）
+- 执行者：Codex分析AI
+- 范围：BTC Paper 自检处理建议
+
+## 结果
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：42 个测试通过。
+- `git diff --check`：通过。
+- 单测验证：preflight 检查项包含 `remediation`；草案冷却 warning 和日损锁 failure 返回明确处理建议；server 自检失败消息包含处理建议。
+- Headless Playwright 打开隔离账本服务页面，注入自检样例 payload 后确认：
+  - 页面渲染 3 条 `.preflight-check` 明细。
+  - 页面渲染 3 条 `.remediation` 处理建议。
+  - `.fail` 状态样式可见。
+  - paper-only 提示仍可见。
+- 临时服务端口 `8788`：无监听进程。

@@ -430,13 +430,14 @@ def proposal_control_summary(state):
     }
 
 
-def preflight_check(name, status, message, severity="info", details=None):
+def preflight_check(name, status, message, severity="info", details=None, remediation=None):
     return {
         "name": name,
         "status": status,
         "severity": severity,
         "message": message,
         "details": details or {},
+        "remediation": remediation or "无需处理。",
     }
 
 
@@ -984,12 +985,14 @@ def command_preflight(args):
             "pass",
             "paper 账本已初始化。",
             details={"state_path": str(path), "mode": state.get("mode")},
+            remediation="确认当前账本路径正确；需要重新开始模拟时再执行 init。",
         ),
         preflight_check(
             "mode",
             "pass",
             f"自动运行模式为 {mode}。",
             details={"mode": mode},
+            remediation="确认模式符合本次目的：tick 只推进模拟成交，scan 会尝试生成新草案。",
         ),
     ]
 
@@ -999,10 +1002,16 @@ def command_preflight(args):
         "pass",
         "本地机器人设置在允许范围内。",
         details={"settings": settings},
+        remediation="需要调整冷却时间时使用 settings 或前端高级设置。",
     ))
 
     if no_market:
-        checks.append(preflight_check("market", "skip", "已跳过行情源检查。"))
+        checks.append(preflight_check(
+            "market",
+            "skip",
+            "已跳过行情源检查。",
+            remediation="正式启动自动运行前应执行一次真实行情自检；没有实时行情时不要模拟成交。",
+        ))
     else:
         try:
             ticker = latest_mexc_ticker()
@@ -1013,6 +1022,7 @@ def command_preflight(args):
                     "pass",
                     "行情源可用。",
                     details={"price": ticker.get("price"), "age_seconds": market_age_seconds(ticker)},
+                    remediation="无需处理；自动运行可以使用当前行情源。",
                 ))
             else:
                 checks.append(preflight_check(
@@ -1021,6 +1031,7 @@ def command_preflight(args):
                     "行情源可用但数据可能滞后。",
                     severity="warning",
                     details={"status": status, "age_seconds": market_age_seconds(ticker)},
+                    remediation="等待下一次行情刷新；若持续滞后，先停止自动运行并检查网络或代理。",
                 ))
         except PaperBotError as exc:
             checks.append(preflight_check(
@@ -1028,6 +1039,7 @@ def command_preflight(args):
                 "fail",
                 f"行情源不可用：{exc}",
                 severity="error",
+                remediation="检查网络、代理和 MEXC 行情源；行情恢复前不要启动自动运行。",
             ))
 
     locked, daily_pnl, lock_amount = is_risk_locked(state)
@@ -1038,6 +1050,7 @@ def command_preflight(args):
             "日内亏损达到风控线，scan 模式不得生成新草案。",
             severity="error",
             details={"daily_realized_pnl": daily_pnl, "lock_amount": lock_amount},
+            remediation="停止生成新草案；只保留 tick 管理已有模拟风险，或重新 init 开始新的 paper 复盘。",
         ))
     elif locked:
         checks.append(preflight_check(
@@ -1046,9 +1059,15 @@ def command_preflight(args):
             "日内亏损达到风控线，tick 只能继续管理已有模拟风险，不得生成新草案。",
             severity="warning",
             details={"daily_realized_pnl": daily_pnl, "lock_amount": lock_amount},
+            remediation="保持 tick 模式处理已有模拟挂单和持仓；不要切换到 scan 生成新草案。",
         ))
     else:
-        checks.append(preflight_check("risk_lock", "pass", "日内风控未锁定。"))
+        checks.append(preflight_check(
+            "risk_lock",
+            "pass",
+            "日内风控未锁定。",
+            remediation="无需处理；仍需遵守单笔风险和最大杠杆限制。",
+        ))
 
     paused = bool(state.get("trading_paused"))
     if paused and mode == "scan":
@@ -1058,6 +1077,7 @@ def command_preflight(args):
             "新草案已手动暂停，scan 模式不得生成新草案。",
             severity="error",
             details={"pause_reason": state.get("pause_reason")},
+            remediation="确认要恢复新草案后执行 resume；否则继续保持暂停。",
         ))
     elif paused:
         checks.append(preflight_check(
@@ -1066,9 +1086,15 @@ def command_preflight(args):
             "新草案已手动暂停，tick 仍可管理已有模拟挂单和持仓。",
             severity="warning",
             details={"pause_reason": state.get("pause_reason")},
+            remediation="如需继续生成草案，先执行 resume；只管理已有风险时保持 tick 即可。",
         ))
     else:
-        checks.append(preflight_check("manual_pause", "pass", "未手动暂停新草案。"))
+        checks.append(preflight_check(
+            "manual_pause",
+            "pass",
+            "未手动暂停新草案。",
+            remediation="无需处理；需要人工熔断时可执行 pause。",
+        ))
 
     active_orders = active_entry_orders(state)
     pending_plans = active_pending_plans(state)
@@ -1085,9 +1111,16 @@ def command_preflight(args):
             "已有持仓、开放挂单或待确认草案，scan 会先 tick，但不会叠加新方向。",
             severity="warning",
             details=exposure_details,
+            remediation="先查看 status；必要时取消待确认草案或开放挂单，等待持仓退出后再生成新方向。",
         ))
     else:
-        checks.append(preflight_check("exposure", "pass", "无阻塞性模拟敞口。", details=exposure_details))
+        checks.append(preflight_check(
+            "exposure",
+            "pass",
+            "无阻塞性模拟敞口。",
+            details=exposure_details,
+            remediation="无需处理；scan 模式可以尝试生成新草案。",
+        ))
 
     proposal_control = proposal_control_summary(state)
     if mode == "scan" and proposal_control["cooldown_remaining_seconds"] > 0:
@@ -1097,9 +1130,16 @@ def command_preflight(args):
             "草案生成处于冷却期，scan 会跳过重复行情分析。",
             severity="warning",
             details=proposal_control,
+            remediation="等待冷却结束；只有人工 CLI/API 调试时才使用 force，自动运行不得绕过冷却。",
         ))
     else:
-        checks.append(preflight_check("proposal_cooldown", "pass", "草案冷却不阻止当前模式。", details=proposal_control))
+        checks.append(preflight_check(
+            "proposal_cooldown",
+            "pass",
+            "草案冷却不阻止当前模式。",
+            details=proposal_control,
+            remediation="无需处理；若频繁生成草案，可在 settings 中提高冷却秒数。",
+        ))
 
     overall = summarize_preflight(checks)
     return {

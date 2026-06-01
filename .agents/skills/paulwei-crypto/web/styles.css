@@ -192,7 +192,7 @@ h2 {
 
 .auto-controls {
   display: grid;
-  grid-template-columns: 110px 120px 120px minmax(120px, auto) minmax(150px, auto) minmax(86px, auto);
+  grid-template-columns: 110px 120px 120px minmax(120px, auto) minmax(150px, auto) minmax(86px, auto) minmax(100px, auto);
   gap: 10px;
   align-items: end;
 }
@@ -230,6 +230,10 @@ h2 {
 
 .preflight-check small {
   grid-column: 2;
+}
+
+.preflight-check .remediation {
+  color: var(--text);
 }
 
 .preflight-check.pass strong {

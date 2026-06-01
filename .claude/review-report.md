@@ -628,3 +628,66 @@
 
 - 自检明细只解释失败原因，暂未提供一键修复动作。
 - 真实行情源异常时仍会阻止自动启动，这是当前风控门禁的预期行为。
+
+---
+
+# BTC Paper 自检处理建议审查
+
+- 生成时间：2026-06-01 10:58（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_bot.py`、`scripts/paper_server.py`、`web/app.js`、`web/styles.css`、`tests/test_paper_bot.py`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，自动运行门禁具备可执行处理建议，未扩大真实交易能力
+- 综合评分：96/100
+
+## 已完成
+
+1. `preflight_check()` 新增 `remediation` 字段，CLI/API/前端共享同一套处理建议。
+2. 行情失败、日损锁、手动暂停、已有敞口、草案冷却等关键检查均返回下一步处理方式。
+3. `/api/auto/start` 自检失败时，错误信息包含失败项和处理建议。
+4. 前端自检明细展示“处理建议”，并对自检文本与 details 做 HTML 转义。
+5. 测试覆盖后端字段、关键 warning/failure 建议和 server 错误信息。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：42 个测试通过。
+- `git diff --check`：通过。
+- Headless Playwright 确认自检明细、处理建议、失败样式和 paper-only 提示可见。
+- 临时服务端口 `8788` 已停止。
+
+## 剩余风险
+
+- 当前只给出人工处理建议，不执行自动修复。
+- 自检建议覆盖运行门禁，不覆盖策略质量评分或市场方向判断。
+
+---
+
+# BTC Paper 自动运行熔断重置审查
+
+- 生成时间：2026-06-01 11:10（中国时区）
+- 执行者：Codex分析AI
+- 审查范围：`scripts/paper_server.py`、`web/index.html`、`web/app.js`、`web/styles.css`、`tests/test_paper_server.py`、`README.md`、`SKILL.md`
+- 结论：通过，补齐自动运行熔断后的人工恢复入口，未扩大真实交易能力
+- 综合评分：96/100
+
+## 已完成
+
+1. `AutoTickController.reset_halt()` 清除本地自动运行错误/熔断状态。
+2. 新增 `POST /api/auto/reset`，只返回本地自动控制器状态，不操作 paper 账本。
+3. 前端自动运行区新增“重置熔断”按钮。
+4. 测试覆盖 reset 后 `halted_at`、`halt_reason`、`last_error` 和连续错误计数被清除。
+5. 文档明确 reset 不启动自动运行、不生成草案、不修改 paper 账本。
+
+## 验证记录
+
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m py_compile scripts/analyze.py scripts/paper_bot.py scripts/paper_server.py .agents/skills/paulwei-crypto/scripts/paper_bot.py .agents/skills/paulwei-crypto/scripts/paper_server.py`：通过。
+- `env PYTHONPYCACHEPREFIX=/private/tmp/paulwei-pycache python3 -m unittest tests/test_paper_bot.py tests/test_paper_server.py`：43 个测试通过。
+- `git diff --check`：通过。
+- `POST /api/auto/reset` 返回 `command=auto/reset`、`running=false`、`last_result_status=reset`。
+- Headless Playwright 确认“重置熔断”按钮和 paper-only 提示可见。
+- 临时服务端口 `8788` 已停止。
+
+## 剩余风险
+
+- reset 只作用于当前 paper server 进程内的自动控制器状态。
+- reset 不等于恢复交易，需要用户重新执行自检并手动启动自动运行。

@@ -296,6 +296,7 @@ class PaperBotCliTest(unittest.TestCase):
             self.assertEqual(payload["status"], "pass")
             self.assertTrue(payload["can_start_auto"])
             self.assertEqual(payload["mode"], "tick")
+            self.assertTrue(all(check["remediation"] for check in payload["checks"]))
 
     def test_preflight_warns_when_scan_is_in_cooldown(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -314,6 +315,8 @@ class PaperBotCliTest(unittest.TestCase):
             self.assertEqual(payload["status"], "warn")
             self.assertTrue(payload["can_start_auto"])
             self.assertIn("proposal_cooldown", [check["name"] for check in payload["checks"]])
+            cooldown_check = next(check for check in payload["checks"] if check["name"] == "proposal_cooldown")
+            self.assertIn("等待冷却结束", cooldown_check["remediation"])
 
     def test_preflight_fails_for_scan_when_risk_locked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -333,8 +336,11 @@ class PaperBotCliTest(unittest.TestCase):
 
             self.assertEqual(payload["status"], "fail")
             self.assertFalse(payload["can_start_auto"])
-            failed_names = [check["name"] for check in payload["checks"] if check["status"] == "fail"]
+            failed_checks = [check for check in payload["checks"] if check["status"] == "fail"]
+            failed_names = [check["name"] for check in failed_checks]
             self.assertIn("risk_lock", failed_names)
+            risk_lock_check = next(check for check in failed_checks if check["name"] == "risk_lock")
+            self.assertIn("停止生成新草案", risk_lock_check["remediation"])
 
     def test_init_propose_place_tick_status_flow_with_fixtures(self):
         with tempfile.TemporaryDirectory() as tmpdir:

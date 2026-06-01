@@ -103,6 +103,19 @@ def validate_auto_max_consecutive_errors(value):
     return count
 
 
+def failed_preflight_messages(preflight_payload):
+    messages = []
+    for check in preflight_payload.get("checks", []):
+        if check.get("status") != "fail":
+            continue
+        message = f"{check.get('name')}: {check.get('message')}"
+        remediation = check.get("remediation")
+        if remediation:
+            message += f"；处理建议：{remediation}"
+        messages.append(message)
+    return messages
+
+
 class AutoTickController:
     """本地 paper 自动 tick 控制器，只调用模拟账本，不触达真实交易接口。"""
 
@@ -229,6 +242,21 @@ class AutoTickController:
             self.stopped_at = paper_bot.utc_now()
             snapshot = self.snapshot()
             snapshot["status"] = "stopped"
+            return snapshot
+
+    def reset_halt(self):
+        with self._lock:
+            was_halted = bool(self.halted_at)
+            had_error_state = bool(self.last_error or self.consecutive_error_count)
+            self.consecutive_error_count = 0
+            self.halted_at = None
+            self.halt_reason = None
+            self.last_error = None
+            self.last_result_status = "reset"
+            snapshot = self.snapshot()
+            snapshot["status"] = "reset"
+            snapshot["was_halted"] = was_halted
+            snapshot["cleared_error_state"] = was_halted or had_error_state
             return snapshot
 
     def tick_once(self):
@@ -489,10 +517,7 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                 )
                 preflight_payload = run_paper_command(paper_bot.command_preflight, preflight_args)
                 if not preflight_payload.get("can_start_auto"):
-                    failed = [
-                        check["message"] for check in preflight_payload.get("checks", [])
-                        if check.get("status") == "fail"
-                    ]
+                    failed = failed_preflight_messages(preflight_payload)
                     raise paper_bot.PaperBotError("auto preflight failed: " + " | ".join(failed))
                 self.send_json({
                     "ok": True,
@@ -511,6 +536,9 @@ class PaperRequestHandler(BaseHTTPRequestHandler):
                 return
             if action == "auto/stop":
                 self.send_json({"ok": True, "command": "auto/stop", "auto_tick": AUTO_TICK.stop()})
+                return
+            if action == "auto/reset":
+                self.send_json({"ok": True, "command": "auto/reset", "auto_tick": AUTO_TICK.reset_halt()})
                 return
             if action == "auto/status":
                 self.send_json({"ok": True, "command": "auto/status", "auto_tick": AUTO_TICK.snapshot()})

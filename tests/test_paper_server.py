@@ -73,6 +73,27 @@ class AutoTickControllerTest(unittest.TestCase):
         self.assertIsNotNone(snapshot["halted_at"])
         self.assertIn("连续", snapshot["halt_reason"])
 
+    def test_auto_tick_controller_reset_halt_clears_error_state_without_starting(self):
+        def bad_tick(_args):
+            raise RuntimeError("fixture failure")
+
+        controller = paper_server.AutoTickController(tick_func=bad_tick, default_interval=0.01)
+        for _ in range(paper_server.MAX_AUTO_CONSECUTIVE_ERRORS):
+            controller.tick_once()
+
+        result = controller.reset_halt()
+
+        self.assertEqual(result["status"], "reset")
+        self.assertTrue(result["was_halted"])
+        self.assertTrue(result["cleared_error_state"])
+        self.assertFalse(result["running"])
+        self.assertEqual(result["consecutive_error_count"], 0)
+        self.assertIsNone(result["halted_at"])
+        self.assertIsNone(result["halt_reason"])
+        self.assertIsNone(result["last_error"])
+        self.assertEqual(result["last_result_status"], "reset")
+        self.assertEqual(result["error_count"], paper_server.MAX_AUTO_CONSECUTIVE_ERRORS)
+
     def test_auto_tick_controller_success_resets_consecutive_errors(self):
         def bad_tick(_args):
             raise RuntimeError("fixture failure")
@@ -156,6 +177,30 @@ class AutoTickControllerTest(unittest.TestCase):
             paper_server.validate_auto_max_consecutive_errors(0)
         with self.assertRaises(paper_server.paper_bot.PaperBotError):
             paper_server.validate_auto_max_consecutive_errors(11)
+
+    def test_failed_preflight_messages_include_remediation(self):
+        payload = {
+            "checks": [
+                {
+                    "name": "market",
+                    "status": "fail",
+                    "message": "行情源不可用。",
+                    "remediation": "检查网络或代理。",
+                },
+                {
+                    "name": "risk_lock",
+                    "status": "pass",
+                    "message": "日内风控未锁定。",
+                    "remediation": "无需处理。",
+                },
+            ]
+        }
+
+        messages = paper_server.failed_preflight_messages(payload)
+
+        self.assertEqual(len(messages), 1)
+        self.assertIn("market", messages[0])
+        self.assertIn("处理建议：检查网络或代理。", messages[0])
 
     def test_run_paper_command_uses_state_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
